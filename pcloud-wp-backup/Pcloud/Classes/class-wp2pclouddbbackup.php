@@ -24,19 +24,38 @@ class WP2PcloudDBBackup {
 
 	/**
 	 * Class constructor
+	 *
+	 * @throws Exception If no writable temporary location is available for the SQL dump.
 	 */
 	public function __construct() {
 
-		if ( PCLOUD_DEBUG && ! defined( 'WP_DEBUG_DISPLAY' ) ) {
-			define( 'WP_DEBUG_DISPLAY', true );
+		// Prefer the system temp dir; fall back to our plugin tmp dir if sys_get_temp_dir is
+		// unwritable. Never fall back to ABSPATH — that location is typically web-readable and
+		// a raw SQL dump there would leak credentials/emails/options.
+		$save_file = @tempnam( sys_get_temp_dir(), 'sqlarchive' ); // phpcs:ignore
+
+		if ( is_string( $save_file ) && is_writable( $save_file ) ) {
+			$this->save_file = $save_file;
+			return;
 		}
 
-		$save_file = tempnam( sys_get_temp_dir(), 'sqlarchive' );
-		if ( ! is_bool( $save_file ) ) {
-			$this->save_file = $save_file;
-		} else {
-			$this->save_file = rtrim( ABSPATH, '/' ) . '/tmp.sql';
+		if ( defined( 'PCLOUD_TEMP_DIR' ) ) {
+			if ( ! is_dir( PCLOUD_TEMP_DIR ) ) {
+				@mkdir( PCLOUD_TEMP_DIR, 0755, true ); // phpcs:ignore
+			}
+			$fallback = @tempnam( PCLOUD_TEMP_DIR, 'sqlarchive' ); // phpcs:ignore
+			if ( is_string( $fallback ) && is_writable( $fallback ) ) {
+				$this->save_file = $fallback;
+				return;
+			}
 		}
+
+		throw new Exception(
+			'Unable to create a writable temporary file for the database dump. Check permissions on '
+			. sys_get_temp_dir()
+			. ( defined( 'PCLOUD_TEMP_DIR' ) ? ' and ' . PCLOUD_TEMP_DIR : '' )
+			. '.'
+		);
 	}
 
 	/**

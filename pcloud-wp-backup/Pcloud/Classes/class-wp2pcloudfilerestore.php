@@ -39,7 +39,8 @@ class WP2PcloudFileRestore {
 			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='err_temp_folder_fail2mk'>ERROR: Temporary folder can not be created!</span> [" . $this->restore_path . ']' );
 			wp2pclouddebugger::log( 'Failed to create Temporary folder!' );
 			wp2pcloudfuncs::set_operation();
-			die();
+
+			throw new WP2PcloudRestoreException( 'Unable to create temporary folder: ' . $this->restore_path );
 		}
 
 		WP_Filesystem();
@@ -70,37 +71,56 @@ class WP2PcloudFileRestore {
 		$api_response = wp_remote_get( $url, $args );
 		if ( is_array( $api_response ) && ! is_wp_error( $api_response ) ) {
 			$response_raw = wp_remote_retrieve_body( $api_response );
-			if ( ! is_wp_error( $response_raw ) ) {
+			if ( is_string( $response_raw ) ) {
 				$content = $response_raw;
 			}
-		} else {
+		} elseif ( is_wp_error( $api_response ) ) {
 			$errstr = $api_response->get_error_message();
 		}
 
-		if ( ! $content ) {
-
+		if ( ! is_string( $content ) || '' === $content ) {
 			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='err_failed2open_conn'>Failed to open connection to the backup file:</span> [url: $url] " . $errstr );
 			wp2pclouddebugger::log( 'download_chunk_curl() - Failed to open connection to the backup file: [ url: ' . $url . ', err: ' . $errstr . ' ]' );
-
-		} else {
-
-			$o_handle = fopen( $archive_file, 'ab' ); // phpcs:ignore
-			if ( ! $o_handle ) {
-
-				wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='err_open_output_f'>Error opening the output file!</span>" );
-				wp2pclouddebugger::log( 'download_chunk_curl() - Error opening the output file!' );
-
-				return $offset;
-			} else {
-				fwrite( $o_handle, $content ); // phpcs:ignore
-			}
-
-			fclose( $o_handle ); // phpcs:ignore
-
-			$offset += $chunksize;
+			return $offset; // No progress; caller treats this as a failure.
 		}
 
-		return intval( $offset );
+		// Open for read/write (create if missing). We use fseek+fwrite so retries on the same
+		// offset are idempotent — unlike the previous append-mode, which produced duplicate bytes.
+		if ( ! file_exists( $archive_file ) ) {
+			// Ensure the file exists so r+b can open it.
+			$create_handle = fopen( $archive_file, 'wb' ); // phpcs:ignore
+			if ( false === $create_handle ) {
+				wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='err_open_output_f'>Error opening the output file!</span>" );
+				wp2pclouddebugger::log( 'download_chunk_curl() - Error creating the output file!' );
+				return $offset;
+			}
+			fclose( $create_handle ); // phpcs:ignore
+		}
+
+		$o_handle = fopen( $archive_file, 'r+b' ); // phpcs:ignore
+		if ( false === $o_handle ) {
+			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='err_open_output_f'>Error opening the output file!</span>" );
+			wp2pclouddebugger::log( 'download_chunk_curl() - Error opening the output file!' );
+			return $offset;
+		}
+
+		$bytes_written = 0;
+		try {
+			if ( 0 !== fseek( $o_handle, $offset ) ) { // phpcs:ignore
+				wp2pclouddebugger::log( 'download_chunk_curl() - fseek failed, offset=' . $offset );
+				return $offset;
+			}
+			$written = fwrite( $o_handle, $content ); // phpcs:ignore
+			if ( false === $written ) {
+				wp2pclouddebugger::log( 'download_chunk_curl() - fwrite failed, offset=' . $offset );
+				return $offset;
+			}
+			$bytes_written = $written;
+		} finally {
+			fclose( $o_handle ); // phpcs:ignore
+		}
+
+		return intval( $offset + $bytes_written );
 	}
 
 	/**
@@ -114,42 +134,47 @@ class WP2PcloudFileRestore {
 		$zip = new ZipArchive();
 		$res = $zip->open( $archive_file );
 
-		if ( is_bool( $res ) && $res ) {
+		if ( true === $res ) {
 
-			for ( $i = 0; $i < $zip->{'numFiles'}; $i ++ ) {
-				$file_name = $zip->getNameIndex( $i );
-				$zip->extractTo( rtrim( ABSPATH, '/' ), array( $file_name ) );
-			}
+			// Single call extracts all entries in one pass. Previously we looped calling
+			// extractTo($target, [$one_name]) per entry, which forced a central-directory
+			// re-scan on every iteration and made large-archive restores effectively hang.
+			$ok = $zip->extractTo( rtrim( ABSPATH, '/' ) );
+			$zip->close();
 
-			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='zip_file_extracted'>ZIP file ( archive ), successfully extracted!</span>" );
-			wp2pclouddebugger::log( 'restore->extract() - ZIP file ( archive ), successfully extracted!' );
-
-		} else {
-
-			wp2pcloudlogger::info( '<span>' . $archive_file . '</span>' );
-			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='zip_file_extract_fail'>Failed to extract the archive, check the ZIP file for issues!</span>" );
-			wp2pclouddebugger::log( 'restore->extract() - ZIP file ( archive ), successfully extracted!' );
-
-			$zip_file_functions_errors = array(
-				0                        => 'OK',
-				ZIPARCHIVE::ER_EXISTS    => 'File already exists.',
-				ZIPARCHIVE::ER_INCONS    => 'Zip archive inconsistent.',
-				ZIPARCHIVE::ER_INVAL     => 'Invalid argument.',
-				ZIPARCHIVE::ER_MEMORY    => 'Malloc failure.',
-				ZIPARCHIVE::ER_NOENT     => 'No such file.',
-				ZIPARCHIVE::ER_NOZIP     => 'Not a zip archive.',
-				ZIPARCHIVE::ER_OPEN      => 'Can not open file.',
-				ZIPARCHIVE::ER_READ      => 'Read error.',
-				ZIPARCHIVE::ER_SEEK      => 'Seek error.',
-				ZIPARCHIVE::ER_MULTIDISK => 'Multi-disk zip archives not supported.',
-			);
-
-			if ( isset( $zip_file_functions_errors[ $res ] ) ) {
-				wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='zip_error'>ZIP Error</span>: " . $zip_file_functions_errors[ $res ] );
-				wp2pclouddebugger::log( 'restore->extract() - ZIP Error:' . $zip_file_functions_errors[ $res ] );
+			if ( $ok ) {
+				wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='zip_file_extracted'>ZIP file ( archive ), successfully extracted!</span>" );
+				wp2pclouddebugger::log( 'restore->extract() - ZIP file ( archive ), successfully extracted!' );
 			} else {
-				wp2pclouddebugger::log( 'restore->extract() - ZIP seems OK' );
+				wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='zip_file_extract_fail'>Failed to extract the archive, check the ZIP file for issues!</span>" );
+				wp2pclouddebugger::log( 'restore->extract() - extractTo() returned false for ' . $archive_file );
 			}
+
+			return;
+		}
+
+		wp2pcloudlogger::info( '<span>' . esc_html( $archive_file ) . '</span>' );
+		wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='zip_file_extract_fail'>Failed to extract the archive, check the ZIP file for issues!</span>" );
+
+		$zip_file_functions_errors = array(
+			0                        => 'OK',
+			ZIPARCHIVE::ER_EXISTS    => 'File already exists.',
+			ZIPARCHIVE::ER_INCONS    => 'Zip archive inconsistent.',
+			ZIPARCHIVE::ER_INVAL     => 'Invalid argument.',
+			ZIPARCHIVE::ER_MEMORY    => 'Malloc failure.',
+			ZIPARCHIVE::ER_NOENT     => 'No such file.',
+			ZIPARCHIVE::ER_NOZIP     => 'Not a zip archive.',
+			ZIPARCHIVE::ER_OPEN      => 'Can not open file.',
+			ZIPARCHIVE::ER_READ      => 'Read error.',
+			ZIPARCHIVE::ER_SEEK      => 'Seek error.',
+			ZIPARCHIVE::ER_MULTIDISK => 'Multi-disk zip archives not supported.',
+		);
+
+		if ( is_int( $res ) && isset( $zip_file_functions_errors[ $res ] ) ) {
+			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='zip_error'>ZIP Error</span>: " . $zip_file_functions_errors[ $res ] );
+			wp2pclouddebugger::log( 'restore->extract() - ZIP Error: ' . $zip_file_functions_errors[ $res ] );
+		} else {
+			wp2pclouddebugger::log( 'restore->extract() - open failed with code ' . var_export( $res, true ) );
 		}
 	}
 
@@ -220,28 +245,70 @@ class WP2PcloudFileRestore {
 				}
 			}
 
-			$full_sql_data = '';
-			if ( $wp_filesystem->exists( $sql ) ) {
-				$sql_data = $wp_filesystem->get_contents( $sql );
-				if ( ! is_bool( $sql_data ) ) {
-					$full_sql_data = $sql_data;
-				}
-			}
+			// Stream the SQL file line by line, splitting on `;` that are outside string
+			// literals. Previous revisions did explode(";\n", ...) which (a) loaded the whole
+			// dump into RAM (OOM on large sites) and (b) broke any row whose content contained
+			// a ";\n" sequence (common in post_content / options).
+			$fh = fopen( $sql, 'rb' ); // phpcs:ignore
+			if ( false === $fh ) {
+				wp2pclouddebugger::log( 'restore->restore_db() - fopen failed for ' . $sql );
+				wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='failed_to_open_sql'>Failed to open the SQL backup for reading.</span>" );
+			} else {
+				$buffer    = '';
+				$in_single = false;
+				$in_double = false;
+				$escaped   = false;
 
-			$q = explode( ";\n", $full_sql_data );
-			foreach ( $q as $v ) {
-				$v = trim( $v );
-				if ( empty( $v ) ) {
-					continue;
-				}
+				$flush = static function ( string $stmt ) use ( &$q_ex_num, $db ) {
+					$stmt = trim( $stmt );
+					if ( '' === $stmt || ';' === $stmt ) {
+						return;
+					}
+					try {
+						$db->exec( $stmt );
+						$q_ex_num++;
+					} catch ( PDOException $e ) {
+						$short = substr( $stmt, 0, 120 );
+						wp2pclouddebugger::log( 'restore->restore_db() - stmt failed: ' . $short . ' | ' . $e->getMessage() );
+						wp2pcloudlogger::info( 'Failed to execute database query: ' . $e->getMessage() );
+					}
+				};
+
 				try {
-					$db->query( $v );
-					$q_ex_num ++;
-				} catch ( PDOException $e ) {
-					$dbg_ex = $e->getMessage();
-					$q      = substr( $full_sql_data, 0, 100 );
-					wp2pclouddebugger::log( 'restore->restore_db() - Failed to execute database query: ' . $q . ' ! Error: ' . $dbg_ex );
-					wp2pcloudlogger::info( 'Failed to execute database query: ' . $e->getMessage() );
+					while ( ( $line = fgets( $fh ) ) !== false ) {
+						$len = strlen( $line );
+						for ( $i = 0; $i < $len; $i++ ) {
+							$ch      = $line[ $i ];
+							$buffer .= $ch;
+
+							if ( $escaped ) {
+								$escaped = false;
+								continue;
+							}
+							if ( '\\' === $ch ) {
+								$escaped = true;
+								continue;
+							}
+							if ( "'" === $ch && ! $in_double ) {
+								$in_single = ! $in_single;
+								continue;
+							}
+							if ( '"' === $ch && ! $in_single ) {
+								$in_double = ! $in_double;
+								continue;
+							}
+							if ( ';' === $ch && ! $in_single && ! $in_double ) {
+								$flush( $buffer );
+								$buffer = '';
+							}
+						}
+					}
+					// Flush any trailing statement missing a terminating semicolon.
+					if ( '' !== trim( $buffer ) ) {
+						$flush( $buffer );
+					}
+				} finally {
+					fclose( $fh ); // phpcs:ignore
 				}
 			}
 		} else {
@@ -271,10 +338,13 @@ class WP2PcloudFileRestore {
 						);
 					}
 				}
-
-				$wpdb->query( "DELETE FROM $wpdb->options WHERE option_name LIKE '_transient_%'" );
-				$wpdb->query( "DELETE FROM $wpdb->options WHERE option_name LIKE '_site_transient_%'" );
 			}
+
+			// Always clear transients after a DB restore, regardless of whether there were any
+			// logged-in sessions to preserve. Stale transients from the old DB confuse the cache
+			// layer (WP core and many plugins).
+			$wpdb->query( "DELETE FROM $wpdb->options WHERE option_name LIKE '_transient_%'" );
+			$wpdb->query( "DELETE FROM $wpdb->options WHERE option_name LIKE '_site_transient_%'" );
 		} else {
 			wp2pcloudlogger::info( 'Failed to restore Database, no queries executed, check the backup.sql file!' );
 			wp2pclouddebugger::log( 'restore->restore_db() - Failed to restore Database, no queries executed, check the backup.sql file!' );

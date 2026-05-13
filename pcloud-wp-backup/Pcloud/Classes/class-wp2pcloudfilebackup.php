@@ -70,7 +70,7 @@ class WP2PcloudFileBackup {
 		$this->sql_backup_file = '';
 		$this->base_dir        = $base_dir;
 		$this->authkey         = wp2pcloudfuncs::get_storred_val( PCLOUD_AUTH_KEY );
-		$this->apiep           = rtrim( 'https://' . wp2pcloudfuncs::get_api_ep_hostname() );
+		$this->apiep           = 'https://' . wp2pcloudfuncs::get_api_ep_hostname();
 		$this->part_size       = 3 * 1000 * 1000;
 
 		$this_dirs_path = explode( DIRECTORY_SEPARATOR, __DIR__ );
@@ -187,23 +187,35 @@ class WP2PcloudFileBackup {
 
 			for ( $try = 0; $try < 5; $try ++ ) {
 
+				if ( $try > 0 ) {
+					// Remove any partial NNN_archive.zip files left by the previous attempt.
+					// Keep backup.sql.zip (created outside this retry loop and still valid).
+					$stale = glob( $local_backup_path_name . '/[0-9][0-9][0-9]_archive.zip' );
+					if ( is_array( $stale ) ) {
+						foreach ( $stale as $stale_file ) {
+							if ( is_writable( $stale_file ) ) {
+								@unlink( $stale_file ); // phpcs:ignore
+							}
+						}
+					}
+				}
+
 				wp2pclouddebugger::log( 'Attempt [ #' . ( $try + 1 ) . ' ] to create the ZIP archive!' );
 
 				$archive_files = $this->create_zip( $files, $local_backup_path_name );
 				if ( 0 < count( $archive_files ) ) {
 					break;
-				} else {
-
-					$operation             = wp2pcloudfuncs::get_operation();
-					$operation['failures'] = 0;
-					wp2pcloudfuncs::set_operation( $operation );
-
-					wp2pcloudfuncs::add_item_for_async_update( 'failures', 0 );
-
-					wp2pclouddebugger::log( 'Closing ZIP archive with attempt: ' . ( $try + 1 ) . ' failed, retrying!' );
-
-					$files = self::find_all_files( $rootdir );
 				}
+
+				$operation             = wp2pcloudfuncs::get_operation();
+				$operation['failures'] = 0;
+				wp2pcloudfuncs::set_operation( $operation );
+
+				wp2pcloudfuncs::add_item_for_async_update( 'failures', 0 );
+
+				wp2pclouddebugger::log( 'Closing ZIP archive with attempt: ' . ( $try + 1 ) . ' failed, retrying!' );
+
+				$files = self::find_all_files( $rootdir );
 			}
 
 			if ( 0 === count( $archive_files ) ) {
@@ -232,7 +244,7 @@ class WP2PcloudFileBackup {
 
 					wp2pcloudfuncs::set_operation();
 
-					exit();
+					throw new WP2PcloudBackupException( 'Backup archives failed validation: ' . $e->getMessage(), 0, $e );
 				}
 			}
 		} else {
@@ -242,7 +254,7 @@ class WP2PcloudFileBackup {
 
 			wp2pcloudfuncs::set_operation();
 
-			exit();
+			throw new WP2PcloudBackupException( 'PHP zip extension is missing; cannot create backup archive.' );
 		}
 
 		wp2pclouddebugger::log( 'Archiving process - COMPLETED!' );
@@ -312,10 +324,6 @@ class WP2PcloudFileBackup {
 	 */
 	private function find_all_files( string $dir ): array {
 
-		if ( in_array( $dir, $this->skip_folders, true ) ) {
-			return array();
-		}
-
 		$root = scandir( $dir );
 
 		if ( is_array( $root ) ) {
@@ -364,11 +372,17 @@ class WP2PcloudFileBackup {
 
 		wp2pclouddebugger::log( 'ZIP state - start zipping the rest of the files!' );
 
-		$files_skipped      = array();
-		$num_files          = count( $files );
-		$actually_added     = 0;
-		$max_memory_allowed = WP2PcloudFuncs::get_memory_limit();
-		$max_memory_allowed = round( $max_memory_allowed - ( ( $max_memory_allowed / 100 ) * 30 ), 2 ); // 30% lower
+		$files_skipped  = array();
+		$num_files      = count( $files );
+		$actually_added = 0;
+
+		// Split archives when PHP memory climbs past 70% of its ceiling. get_memory_limit()
+		// now returns megabytes (or -1 when unlimited); on unlimited we disable splitting by
+		// memory entirely and let the fallback file-size caps do their job.
+		$mem_limit_mb       = WP2PcloudFuncs::get_memory_limit();
+		$max_memory_allowed = ( $mem_limit_mb > 0 )
+			? round( $mem_limit_mb * 0.7, 2 )
+			: PHP_INT_MAX;
 
 		if ( $num_files > 500000 ) {
 			wp2pcloudfuncs::set_storred_val( PCLOUD_MAX_NUM_FAILURES_NAME, 15000 );
@@ -443,10 +457,9 @@ class WP2PcloudFileBackup {
 
 						wp2pcloudlogger::info( "Error: failed to create zip archive! Check the 'debug' info ( right/top ) button for more info!" );
 						wp2pclouddebugger::log( '--------- |||| -------- Failed to create ZIP file!' );
-						wp2pclouddebugger::log( '--------- |||| -------- Error:' );
-						wp2pclouddebugger::log( $e->getMessage() );
+						wp2pclouddebugger::log( '--------- |||| -------- Error: ' . $e->getMessage() );
 
-						die();
+						throw new WP2PcloudBackupException( 'create_zip() save_as_file failed: ' . $e->getMessage(), 0, $e );
 					}
 
 					$archive_index++;
@@ -561,10 +574,7 @@ class WP2PcloudFileBackup {
 	 * @return int
 	 */
 	private function get_upload_dir_id(): int {
-		$error = '';
-
-		$response     = new stdClass();
-		$response_raw = '';
+		$last_error = '';
 
 		$backup_file_index = wp2pcloudfuncs::get_storred_val( PCLOUD_BACKUP_FILE_INDEX );
 		if ( empty( $backup_file_index ) ) {
@@ -576,43 +586,51 @@ class WP2PcloudFileBackup {
 		$final_dir_name = rtrim( PCLOUD_BACKUP_DIR, '/' ) . '/' . $dir_name;
 		$final_dir_name = ltrim( $final_dir_name, '/' );
 
+		wp2pclouddebugger::log( 'get_upload_dir_id() - target path: /' . $final_dir_name );
+
 		$folder_id = 0;
-		for ( $i = 1; $i < 4; $i ++ ) {
+		for ( $i = 1; $i < 4; $i++ ) {
 
-			$api_response = wp_remote_get( $this->apiep . '/listfolder?path=/' . $final_dir_name . '&access_token=' . $this->authkey );
-			if ( is_array( $api_response ) && ! is_wp_error( $api_response ) ) {
-				$response_raw = wp_remote_retrieve_body( $api_response );
-				if ( is_string( $response_raw ) && ! is_wp_error( $response_raw ) ) {
-					$response_json = json_decode( $response_raw );
-					if ( ! is_bool( $response_json ) ) {
-						$response = $response_json;
-					} else {
-						wp2pclouddebugger::log( 'get_upload_dir_id() - failed to convert the response JSON to object!' );
-					}
+			$response     = null;
+			$response_raw = '';
+
+			$listfolder_url = $this->apiep . '/listfolder?path=/' . rawurlencode( $final_dir_name ) . '&access_token=' . $this->authkey;
+			// Replace the encoded slashes so pCloud receives the path unchanged.
+			$listfolder_url = str_replace( '%2F', '/', $listfolder_url );
+
+			$api_response = wp_remote_get( $listfolder_url );
+			if ( is_wp_error( $api_response ) ) {
+				$last_error = $api_response->get_error_message();
+				wp2pclouddebugger::log( 'get_upload_dir_id() - transport error: ' . $last_error );
+			} elseif ( is_array( $api_response ) ) {
+				$response_raw = (string) wp_remote_retrieve_body( $api_response );
+				$status_code  = (int) wp_remote_retrieve_response_code( $api_response );
+				if ( '' === $response_raw ) {
+					$last_error = 'empty body (HTTP ' . $status_code . ')';
+					wp2pclouddebugger::log( 'get_upload_dir_id() - ' . $last_error );
 				} else {
-					wp2pclouddebugger::log( 'get_upload_dir_id() - no response body detected!' );
+					$response = json_decode( $response_raw );
+					if ( ! is_object( $response ) ) {
+						$last_error = 'malformed JSON (HTTP ' . $status_code . '): ' . substr( $response_raw, 0, 200 );
+						wp2pclouddebugger::log( 'get_upload_dir_id() - ' . $last_error );
+						$response = null;
+					}
 				}
-			} else {
-
-				if ( is_wp_error( $api_response ) ) {
-					$error .= $api_response->get_error_message();
-				}
-				wp2pclouddebugger::log( 'get_upload_dir_id() - api call failed ! [ ' . $error . ' ]' );
 			}
 
 			if ( is_object( $response ) && property_exists( $response, 'metadata' ) && property_exists( $response->metadata, 'folderid' ) ) {
 
 				$folder_id = intval( $response->metadata->folderid );
 
-			} elseif ( property_exists( $response, 'result' ) && 2005 === $response->result ) {
+			} elseif ( is_object( $response ) && property_exists( $response, 'result' ) && 2005 === intval( $response->result ) ) {
 
-				$folders = explode( '/', $final_dir_name );
-				wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='backup_in_fld'>Backup will be in folder:</span> " . $final_dir_name );
+				// Target folder doesn't exist yet — create the chain.
+				wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='backup_in_fld'>Backup will be in folder:</span> " . esc_html( $final_dir_name ) );
 
-				$res = new stdClass();
-
-				$final_path  = '';
+				$folders     = explode( '/', $final_dir_name );
 				$num_folders = count( $folders );
+				$final_path  = '';
+				$res         = new stdClass();
 
 				for ( $n = 0; $n < $num_folders; $n++ ) {
 					if ( ! empty( $folders[ $n ] ) ) {
@@ -621,14 +639,47 @@ class WP2PcloudFileBackup {
 					}
 				}
 
-				if ( property_exists( $res, 'metadata' ) && property_exists( $res->metadata, 'folderid' ) ) {
+				if ( is_object( $res ) && property_exists( $res, 'metadata' ) && property_exists( $res->metadata, 'folderid' ) ) {
 					$folder_id = intval( $res->metadata->folderid );
+				} else {
+					$last_error = 'chain createfolder did not return a folderid';
+					wp2pclouddebugger::log( 'get_upload_dir_id() - ' . $last_error . ' — last response: ' . wp_json_encode( $res ) );
 				}
+			} elseif ( is_object( $response ) && property_exists( $response, 'result' ) ) {
+
+				// pCloud returned a non-zero, non-2005 result. Surface the actual reason so
+				// support can diagnose it instead of the previous blank "Check below:" log.
+				$result_code = intval( $response->result );
+				$error_text  = property_exists( $response, 'error' ) && is_string( $response->error ) ? $response->error : '';
+
+				switch ( $result_code ) {
+					case 1000:
+					case 2000:
+					case 2094:
+						$hint = 'your pCloud access token appears to be invalid or expired — please re-authenticate';
+						break;
+					case 2003:
+						$hint = 'access denied — the access token does not have permission for this folder';
+						break;
+					case 2010:
+						$hint = 'invalid path — check PCLOUD_BACKUP_DIR (' . PCLOUD_BACKUP_DIR . ')';
+						break;
+					default:
+						$hint = '';
+				}
+
+				$last_error = 'pCloud result=' . $result_code . ( '' !== $error_text ? ' (' . $error_text . ')' : '' ) . ( '' !== $hint ? ' — ' . $hint : '' );
+				wp2pclouddebugger::log( 'get_upload_dir_id() - ' . $last_error );
+				wp2pcloudlogger::info( '<span style="color: red">pCloud error:</span> ' . esc_html( $last_error ) );
 			} else {
-				wp2pclouddebugger::log( 'get_upload_dir_id() - response from the API does not contain the needed info! Check below:' );
+
+				wp2pclouddebugger::log(
+					'get_upload_dir_id() - unrecognized response shape. Raw body (first 500 bytes): '
+					. substr( $response_raw, 0, 500 )
+				);
 			}
 
-			if ( 0 < $folder_id ) { // We have folder ID , break and move forward.
+			if ( 0 < $folder_id ) {
 				break;
 			}
 
@@ -637,11 +688,11 @@ class WP2PcloudFileBackup {
 
 		if ( 0 === $folder_id ) {
 
-			wp2pclouddebugger::log( 'get_upload_dir_id() - api call failed ! [ ' . $error . ' ]' );
-
-			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='invalid_resp_from_server'>Invalid response from the server:</span> " . $error . "\n" );
+			wp2pclouddebugger::log( 'get_upload_dir_id() - exhausted retries; last error: ' . $last_error );
+			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='invalid_resp_from_server'>Invalid response from the server:</span> " . esc_html( $last_error ) );
 			wp2pcloudfuncs::set_operation();
-			die();
+
+			throw new WP2PcloudBackupException( 'get_upload_dir_id() failed to resolve a remote folder id: ' . $last_error );
 		}
 
 		return $folder_id;
@@ -660,18 +711,18 @@ class WP2PcloudFileBackup {
 	 */
 	public function upload_chunk( string $path, int $folder_id = 0, int $upload_id = 0, int $uploadoffset = 0, int $num_failures = 0 ): int {
 
-		$filesize = abs( filesize( $path ) );
-
-		$this->set_chunk_size( $filesize );
-
 		if ( ! file_exists( $path ) || ! is_file( $path ) || ! is_readable( $path ) ) {
 			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='invalid_file_provided'>Invalid file provided!</span>" );
 			wp2pclouddebugger::log( 'upload_chunk() - Invalid file provided! [ ' . $path . ' ]' );
 
+			// Advance past this file so the state machine moves on to the next one.
 			return intval( $uploadoffset + $this->part_size );
 		}
 
-		if ( $uploadoffset > $filesize ) {
+		$filesize = abs( filesize( $path ) );
+		$this->set_chunk_size( $filesize );
+
+		if ( $uploadoffset >= $filesize ) {
 			return $uploadoffset;
 		}
 
@@ -681,36 +732,38 @@ class WP2PcloudFileBackup {
 		);
 
 		// Complicated file operations, currently not supported by: WP_Filesystem.
-		$file = fopen( $path, 'r' ); // phpcs:ignore
-
-		if ( $uploadoffset > 0 ) {
-			fseek( $file, $uploadoffset ); // phpcs:ignore
+		$file = fopen( $path, 'rb' ); // phpcs:ignore
+		if ( false === $file ) {
+			wp2pclouddebugger::log( 'upload_chunk() - fopen failed [ ' . $path . ' ]' );
+			return $uploadoffset;
 		}
-		$content = fread( $file, $this->part_size ); // phpcs:ignore
+
 		try {
-			if ( ! empty( $content ) ) {
+			if ( $uploadoffset > 0 ) {
+				fseek( $file, $uploadoffset ); // phpcs:ignore
+			}
+			$content = fread( $file, $this->part_size ); // phpcs:ignore
+			$bytes   = is_string( $content ) ? strlen( $content ) : 0;
+
+			if ( $bytes > 0 ) {
 				try {
 					$this->write( $content, $params );
-
-					$uploadoffset += $this->part_size;
-
+					$uploadoffset += $bytes;
 				} catch ( Exception $e ) {
-
 					$retry_in = $num_failures * 2;
-					if ( $retry_in > 120 ) {
+					if ( $retry_in > 60 ) {
 						$retry_in = 60;
 					}
-
 					$dbg_msg = $e->getMessage();
-
 					wp2pcloudlogger::info( 'Upload failed with message: ' . $dbg_msg . ' will retry in: ' . $retry_in . ' sec.' );
-					wp2pclouddebugger::log( 'Upload failed with message: ' . $dbg_msg . ' will retry in: ' . $retry_in . ' sec.' );
-					sleep( $retry_in );
-
+					wp2pclouddebugger::log( 'upload_chunk() - write exception: ' . $dbg_msg );
+					if ( $retry_in > 0 ) {
+						sleep( $retry_in );
+					}
+					// Return unchanged offset so the event processor counts this as a failure.
 				}
 			}
-			fclose( $file ); // phpcs:ignore
-		} catch ( Exception ) {
+		} finally {
 			fclose( $file ); // phpcs:ignore
 		}
 
@@ -731,19 +784,16 @@ class WP2PcloudFileBackup {
 	 */
 	public function upload( string $path, int $folder_id = 0, int $upload_id = 0, int $uploadoffset = 0 ): int {
 		if ( ! file_exists( $path ) || ! is_file( $path ) || ! is_readable( $path ) ) {
-
 			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='invalid_file_provided'>Invalid file provided!</span>" );
 			wp2pclouddebugger::log( 'upload() -> Invalid file provided!' );
 
 			return intval( $uploadoffset + $this->part_size );
-
-		} else {
-			$filesize = abs( filesize( $path ) );
-
-			$this->set_chunk_size( $filesize );
 		}
 
-		if ( $uploadoffset > $filesize ) {
+		$filesize = abs( filesize( $path ) );
+		$this->set_chunk_size( $filesize );
+
+		if ( $uploadoffset >= $filesize ) {
 			return $uploadoffset;
 		}
 
@@ -752,58 +802,54 @@ class WP2PcloudFileBackup {
 			'uploadoffset' => $uploadoffset,
 		);
 
-		$num_failures = 0;
-
-		$file = fopen( $path, 'r' ); // phpcs:ignore
-		while ( ! feof( $file ) ) {
-			$content = fread( $file, $this->part_size ); // phpcs:ignore
-			do {
-				try {
-
-					if ( PCLOUD_DEBUG ) {
-						wp2pclouddebugger::log( 'upload() -> prep2write' );
-					}
-
-					$this->write( $content, $params );
-
-					if ( PCLOUD_DEBUG ) {
-						wp2pclouddebugger::log( 'upload() -> wrote done !' );
-					}
-
-					$params['uploadoffset'] += $this->part_size;
-					$uploadoffset           += $this->part_size;
-
-					if ( PCLOUD_DEBUG ) {
-						wp2pclouddebugger::log( 'upload() -> chunk ++' );
-					}
-
-					$num_failures = 0;
-					continue 2;
-
-				} catch ( Exception $e ) {
-
-					$dbg_ex = $e->getMessage();
-
-					wp2pcloudlogger::info( 'ERR: ' . $dbg_ex . ' [id: ' . $upload_id . ' | offset: ' . $uploadoffset );
-					wp2pclouddebugger::log( 'upload() -> Exception: ' . $dbg_ex );
-
-					$retry_in = $num_failures * 5;
-					if ( $retry_in > 30 ) {
-						$retry_in = 30;
-					}
-
-					$num_failures ++;
-
-					sleep( $retry_in );
-				}
-			} while ( $num_failures < 10 );
-
-			if ( $num_failures > 30 ) {
-				break;
-			}
+		$file = fopen( $path, 'rb' ); // phpcs:ignore
+		if ( false === $file ) {
+			throw new Exception( 'upload() -> fopen failed for ' . $path );
 		}
 
-		fclose( $file ); // phpcs:ignore
+		if ( $uploadoffset > 0 ) {
+			fseek( $file, $uploadoffset ); // phpcs:ignore
+		}
+
+		try {
+			while ( ! feof( $file ) ) {
+				$content = fread( $file, $this->part_size ); // phpcs:ignore
+				$bytes   = is_string( $content ) ? strlen( $content ) : 0;
+				if ( $bytes < 1 ) {
+					break;
+				}
+
+				$num_failures = 0;
+				do {
+					try {
+						if ( PCLOUD_DEBUG ) {
+							wp2pclouddebugger::log( 'upload() -> prep2write (offset=' . $uploadoffset . ', bytes=' . $bytes . ')' );
+						}
+
+						$this->write( $content, $params );
+
+						$params['uploadoffset'] += $bytes;
+						$uploadoffset           += $bytes;
+						$num_failures            = 0;
+						continue 2; // Next chunk.
+
+					} catch ( Exception $e ) {
+						$dbg_ex = $e->getMessage();
+						wp2pcloudlogger::info( 'ERR: ' . $dbg_ex . ' [id: ' . $upload_id . ' | offset: ' . $uploadoffset . ']' );
+						wp2pclouddebugger::log( 'upload() -> Exception: ' . $dbg_ex );
+
+						$num_failures++;
+						$retry_in = min( $num_failures * 5, 30 );
+						sleep( $retry_in );
+					}
+				} while ( $num_failures < 10 );
+
+				// Retries exhausted for this chunk: do not silently advance — the chunk is missing on pCloud.
+				throw new Exception( 'upload() - chunk upload exhausted retries at offset ' . $uploadoffset );
+			}
+		} finally {
+			fclose( $file ); // phpcs:ignore
+		}
 
 		return $uploadoffset;
 	}
@@ -816,39 +862,39 @@ class WP2PcloudFileBackup {
 	 */
 	public function create_upload(): stdClass {
 
-		$response = new stdClass();
+		$last_error = '';
 
-		for ( $i = 1; $i < 4; $i ++ ) {
+		for ( $i = 1; $i < 4; $i++ ) {
 
 			wp2pclouddebugger::log( 'create_upload() - trying to get new upload_id from: ' . $this->apiep . '/upload_create?access_token=...' );
 
 			$api_response = wp_remote_get( $this->apiep . '/upload_create?access_token=' . $this->authkey );
 			if ( is_array( $api_response ) && ! is_wp_error( $api_response ) ) {
 				$response_raw = wp_remote_retrieve_body( $api_response );
-				if ( is_string( $response_raw ) && ! is_wp_error( $response_raw ) ) {
+				if ( is_string( $response_raw ) && '' !== $response_raw ) {
 					$response_json = json_decode( $response_raw );
-					if ( ! is_bool( $response_json ) ) {
-						$response = $response_json;
+					if ( is_object( $response_json ) && property_exists( $response_json, 'uploadid' ) ) {
 						wp2pclouddebugger::log( 'create_upload() - OK' );
-						break;
-					} else {
-						wp2pclouddebugger::log( 'create_upload() - failed to convert the response JSON to object! Will retry!' );
+						return $response_json;
 					}
+					$last_error = 'response missing uploadid';
+					wp2pclouddebugger::log( 'create_upload() - ' . $last_error );
 				} else {
-					wp2pclouddebugger::log( 'create_upload() - no response body detected! Will retry!' );
+					$last_error = 'no response body';
+					wp2pclouddebugger::log( 'create_upload() - ' . $last_error );
 				}
 			} else {
-				$error = '';
-				if ( is_wp_error( $api_response ) ) {
-					$error = $api_response->get_error_message();
-				}
-				wp2pclouddebugger::log( 'create_upload() - api call failed ! [ ' . $error . ' ]! Will retry!' );
+				$last_error = is_wp_error( $api_response ) ? $api_response->get_error_message() : 'unknown transport error';
+				wp2pclouddebugger::log( 'create_upload() - api call failed ! [ ' . $last_error . ' ]' );
 			}
 
 			sleep( 5 * $i );
 		}
 
-		return $response;
+		// All retries exhausted; do not return an empty stdClass (which callers accepted as
+		// "success" and then read an undefined ->uploadid, yielding int 0 on coerce, which in
+		// turn led pCloud to reject every chunk for hours).
+		throw new Exception( 'create_upload() exhausted retries: ' . $last_error );
 	}
 
 	/**
@@ -915,7 +961,6 @@ class WP2PcloudFileBackup {
 			),
 			'body'        => $content, // Ensure this matches the server's expected format
 			'cookies'     => array(),
-			'sslverify'   => false,
 		);
 
 		$api_response = wp_remote_request( $this->apiep . '/upload_write?' . http_build_query( $get_params ), $args );

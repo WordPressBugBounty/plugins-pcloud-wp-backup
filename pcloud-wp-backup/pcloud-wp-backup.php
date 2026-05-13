@@ -9,7 +9,7 @@
  * Plugin URI: https://www.pcloud.com
  * Summary: pCloud WP Backup plugin
  * Description: pCloud WP Backup has been created to make instant backups of your blog and its data, regularly.
- * Version: 2.0.1
+ * Version: 2.0.2
  * Requires PHP: 8.0
  * Author: pCloud
  * URI: https://www.pcloud.com
@@ -26,6 +26,7 @@ use Pcloud\Classes\wp2pcloudfilebackup;
 use Pcloud\Classes\wp2pcloudfilerestore;
 use Pcloud\Classes\wp2pcloudfuncs;
 use Pcloud\Classes\wp2pcloudlogger;
+use Pcloud\Classes\WP2PcloudRatingPrompt;
 
 require plugin_dir_path( __FILE__ ) . 'Pcloud/class-autoloader.php';
 
@@ -100,6 +101,21 @@ if ( ! defined( 'PCLOUD_PLUGIN_MIN_PHP_VERSION' ) ) {
 // The maximum number of failures allowed.
 $max_num_failures = 1800;
 
+// Cron event args — must be identical everywhere we schedule, check, or clear init_autobackup.
+// WordPress matches cron events by BOTH hook name AND args. The original code used array(false)
+// but some call sites omitted it, causing wp_next_scheduled() to return false even when the
+// event existed. This constant ensures every call site agrees.
+if ( ! defined( 'PCLOUD_CRON_ARGS' ) ) {
+	define( 'PCLOUD_CRON_ARGS', serialize( array( false ) ) );
+}
+/**
+ * Helper — returns the cron args array. Using a function because define() can't hold arrays
+ * directly on PHP < 8.1 in all contexts, and we want a single source of truth.
+ */
+function wp2pcl_cron_args(): array {
+	return array( false );
+}
+
 /**
  * This hack will increase the wp_remote_request timeout, which otherwise dies after 5-10sec.
  *
@@ -150,6 +166,39 @@ function backup_to_pcloud_admin_menu(): void {
  * @noinspection PhpUnused
  */
 function wp2pcl_ajax_process_request(): void {
+
+	global $sitename;
+
+	try {
+		wp2pcl_ajax_process_request_inner();
+	} catch ( \Pcloud\Classes\WP2PcloudBackupException $e ) {
+		wp2pclouddebugger::log( 'ajax: backup exception caught: ' . $e->getMessage() );
+		wp2pcloudfuncs::set_operation();
+		echo wp_json_encode( array(
+			'status'   => 90,
+			'message'  => 'Backup failed: ' . $e->getMessage(),
+			'sitename' => $sitename,
+		) );
+	} catch ( \Pcloud\Classes\WP2PcloudRestoreException $e ) {
+		wp2pclouddebugger::log( 'ajax: restore exception caught: ' . $e->getMessage() );
+		wp2pcloudfuncs::set_operation();
+		echo wp_json_encode( array(
+			'status'   => 91,
+			'message'  => 'Restore failed: ' . $e->getMessage(),
+			'sitename' => $sitename,
+		) );
+	}
+	die();
+}
+
+/**
+ * Inner body of the AJAX handler. Kept separate so top-level `wp2pcl_ajax_process_request`
+ * can uniformly catch typed backup/restore exceptions and reset state, instead of each
+ * deep call site having to die() on its own.
+ *
+ * @return void
+ */
+function wp2pcl_ajax_process_request_inner(): void {
 
 	global $sitename;
 
@@ -209,12 +258,12 @@ function wp2pcl_ajax_process_request(): void {
 		$result['status'] = 0;
 
 		$authkey  = wp2pcloudfuncs::get_storred_val( PCLOUD_AUTH_KEY );
-		$apiep    = rtrim( 'https://' . wp2pcloudfuncs::get_api_ep_hostname() );
+		$apiep    = 'https://' . wp2pcloudfuncs::get_api_ep_hostname();
 		$url      = $apiep . '/userinfo?access_token=' . $authkey;
 		$response = wp_remote_get( $url );
 		if ( is_array( $response ) && ! is_wp_error( $response ) ) {
 			$response_body_list = json_decode( $response['body'] );
-			if ( property_exists( $response_body_list, 'result' ) ) {
+			if ( is_object( $response_body_list ) && property_exists( $response_body_list, 'result' ) ) {
 				$resp_result = intval( $response_body_list->result );
 				if ( 0 === $resp_result ) {
 					$result['data'] = $response_body_list;
@@ -237,12 +286,12 @@ function wp2pcl_ajax_process_request(): void {
 		$result['contents'] = array();
 
 		$authkey  = wp2pcloudfuncs::get_storred_val( PCLOUD_AUTH_KEY );
-		$apiep    = rtrim( 'https://' . wp2pcloudfuncs::get_api_ep_hostname() );
+		$apiep    = 'https://' . wp2pcloudfuncs::get_api_ep_hostname();
 		$url      = $apiep . '/listfolder?path=/' . PCLOUD_BACKUP_DIR . '&access_token=' . $authkey;
 		$response = wp_remote_get( $url );
 		if ( is_array( $response ) && ! is_wp_error( $response ) ) {
 			$response_body_list = json_decode( $response['body'] );
-			if ( property_exists( $response_body_list, 'result' ) ) {
+			if ( is_object( $response_body_list ) && property_exists( $response_body_list, 'result' ) ) {
 				$resp_result = intval( $response_body_list->result );
 				if ( ( 0 === $resp_result ) && property_exists( $response_body_list, 'metadata' ) && property_exists( $response_body_list->metadata, 'contents' ) ) {
 					$result['folderid'] = $response_body_list->metadata->folderid;
@@ -279,7 +328,7 @@ function wp2pcl_ajax_process_request(): void {
 
 			wp2pcloudfuncs::set_storred_val( PCLOUD_LAST_BACKUPDT, '0' );
 
-			wp_clear_scheduled_hook( 'init_autobackup' );
+			wp_clear_scheduled_hook( 'init_autobackup', wp2pcl_cron_args() );
 
 			wp2pcl_run_pcloud_backup_hook();
 		}
@@ -329,7 +378,7 @@ function wp2pcl_ajax_process_request(): void {
 
 		if ( $file_id > 0 || $folder_id > 0 || empty( $hostname ) ) {
 
-			$apiep      = rtrim( 'https://' . wp2pcloudfuncs::get_api_ep_hostname() );
+			$apiep      = 'https://' . wp2pcloudfuncs::get_api_ep_hostname();
 			$archives   = array();
 			$total_size = 0;
 
@@ -339,7 +388,7 @@ function wp2pcl_ajax_process_request(): void {
 				$response = wp_remote_get( $url );
 				if ( is_array( $response ) && ! is_wp_error( $response ) ) {
 					$response_body_list = json_decode( $response['body'] );
-					if ( property_exists( $response_body_list, 'result' ) ) {
+					if ( is_object( $response_body_list ) && property_exists( $response_body_list, 'result' ) ) {
 						$resp_result = intval( $response_body_list->result );
 						if ( 0 === $resp_result && property_exists( $response_body_list, 'metadata' ) && property_exists( $response_body_list->metadata, 'contents' ) ) {
 							foreach ( $response_body_list->metadata->contents as $item ) {
@@ -351,7 +400,9 @@ function wp2pcl_ajax_process_request(): void {
 										$response = wp_remote_get( $url );
 										if ( is_array( $response ) && ! is_wp_error( $response ) ) {
 											$r = json_decode( $response['body'] );
-											if ( intval( $r->result ) === 0 ) {
+											if ( is_object( $r ) && property_exists( $r, 'result' ) && 0 === intval( $r->result )
+												&& property_exists( $r, 'hosts' ) && is_array( $r->hosts ) && ! empty( $r->hosts )
+												&& property_exists( $r, 'path' ) ) {
 												$url         = 'https://' . reset( $r->hosts ) . $r->path;
 												$archives[]  = array(
 													'fileid' => $item->fileid,
@@ -373,7 +424,9 @@ function wp2pcl_ajax_process_request(): void {
 				$response = wp_remote_get( $url );
 				if ( is_array( $response ) && ! is_wp_error( $response ) ) {
 					$r = json_decode( $response['body'] );
-					if ( intval( $r->result ) === 0 ) {
+					if ( is_object( $r ) && property_exists( $r, 'result' ) && 0 === intval( $r->result )
+						&& property_exists( $r, 'hosts' ) && is_array( $r->hosts ) && ! empty( $r->hosts )
+						&& property_exists( $r, 'path' ) && property_exists( $r, 'size' ) ) {
 						$url        = 'https://' . reset( $r->hosts ) . $r->path;
 						$archives[] = array(
 							'fileid' => $file_id,
@@ -400,6 +453,7 @@ function wp2pcl_ajax_process_request(): void {
 				'offset'      => 0,
 				'downloaded'  => 0,
 				'total_size'  => $total_size,
+				'failures'    => 0,
 			);
 
 			wp2pcloudfuncs::set_operation( $op_data );
@@ -412,37 +466,65 @@ function wp2pcl_ajax_process_request(): void {
 		}
 	} elseif ( 'get_log' === $m ) {
 
-		$result['perc'] = 0;
-		$operation      = wp2pcloudfuncs::get_operation();
+		$nonce = isset( $_GET['wp2pcl_nonce'] ) ? sanitize_key( $_GET['wp2pcl_nonce'] ) : '';
+		if ( '' === $nonce || ! wp_verify_nonce( $nonce ) ) {
+			$result['status']   = 15;
+			$result['msg']      = '<p>Failed to validate the request!</p>';
+			$result['sitename'] = $sitename;
+			echo wp_json_encode( $result );
+			return;
+		}
 
-		if ( isset( $operation['mode'] ) && 'auto' === $operation['mode'] ) {
+		if ( ! current_user_can( 'administrator' ) ) {
+			$result['status']   = 16;
+			$result['msg']      = '<p>Insufficient permissions.</p>';
+			$result['sitename'] = $sitename;
+			echo wp_json_encode( $result );
+			return;
+		}
 
-			if ( isset( $operation['upload_files'] ) ) {
+		$operation = wp2pcloudfuncs::get_operation();
 
-				$upload_files = trim( $operation['upload_files'] );
-				$upload_files = json_decode( $upload_files, true );
-				$size         = 0;
+		$op_type  = $operation['operation'] ?? 'nothing';
+		$op_state = $operation['state'] ?? 'sleep';
+		$op_mode  = $operation['mode'] ?? '';
 
-				foreach ( $upload_files as $file ) {
-					$path = PCLOUD_TEMP_DIR . '/' . $file;
-					if ( is_file( $path ) ) {
-						$size += filesize( $path );
-					}
-				}
+		// Decide whether the poll should advance the state machine or just report.
+		//
+		// Heavy phases (init, preparing) run only from the cron context — they do
+		// synchronous ZIP creation and folder setup that would block the AJAX
+		// response. The poll just reports a human-readable status for these.
+		//
+		// Lightweight phases (ready_to_push, uploading_chunks, download states)
+		// CAN be advanced by the poll. This is essential: it means auto backups
+		// upload at the same speed as manual when the admin page is open, instead
+		// of only moving one chunk per 2-minute cron tick.
 
-				$result['offset']    = $operation['offset'];
-				$result['size']      = $size;
-				$result['sizefancy'] = '~' . round( ( $size / 1024 / 1024 ), 2 ) . ' MB';
-				$result['perc']      = 0;
+		$poll_can_advance = in_array( $op_state, array(
+			'ready_to_push',
+			'uploading_chunks',
+			'init',             // download init (trivial state transition)
+			'download_chunks',
+			'extract',
+			'restoredb',
+			'cleanup',
+		), true );
 
-				if ( $size > 0 ) {
-					$result['perc'] = round( abs( $result['offset'] / ( $size / 100 ) ), 2 );
-				}
+		// For upload init/preparing, the cron handles the heavy lifting.
+		$is_upload_prep = ( 'upload' === $op_type && in_array( $op_state, array( 'init', 'preparing' ), true ) );
+
+		if ( $is_upload_prep ) {
+			// Show a status message while the cron thread creates the ZIP archive.
+			$result['hasactivity'] = '1';
+			if ( 'init' === $op_state ) {
+				$result['log'] = '<br/>' . gmdate( 'Y-m-d H:i:s' ) . ' - <span class="pcl_transl" data-i10nk="start_auto_backup_at">Automatic backup is starting, please wait...</span>';
 			}
-		} else {
-			$proc                = wp2pcl_event_processor();
-			$result['operation'] = $operation;
-			$result              = $proc['result'];
+			// For 'preparing', the cron thread is writing to the user/debug log
+			// in real time; we'll pick up those entries below via read_last_log.
+
+		} elseif ( ( 'upload' === $op_type || 'download' === $op_type ) && $poll_can_advance ) {
+			$proc   = wp2pcl_event_processor();
+			$result = $proc['result'];
 		}
 
 		$result['hasactivity'] = wp2pcloudfuncs::get_storred_val( PCLOUD_HAS_ACTIVITY, '0' );
@@ -465,11 +547,9 @@ function wp2pcl_ajax_process_request(): void {
 			$result['operation'] = $operation;
 		}
 
-		// If strategy - auto, remove the progress bar!
-		if ( isset( $operation['mode'] ) && 'auto' === $operation['mode'] ) {
-			$result['percdbg'] = $result['perc'];
-			unset( $result['perc'] );
-		}
+		// Auto-mode backups now show the same progress bar as manual. Previously
+		// the percentage was stripped here, leaving no visible indication that an
+		// auto backup was running — the #1 user complaint about scheduled backups.
 
 		$result['memlimit']    = ( defined( 'WP_MEMORY_LIMIT' ) ? WP_MEMORY_LIMIT : '---' );
 		$result['memlimitini'] = ini_get( 'memory_limit' );
@@ -531,6 +611,28 @@ function wp2pcl_event_processor(): array {
 
 	$operation = wp2pcloudfuncs::get_operation();
 
+	// Prevent concurrent state transitions. Two poll requests (e.g. admin opens the page in
+	// two tabs, or cron fires while a poll is in flight) used to race and could double-advance
+	// the state machine — e.g. both transitioning `ready_to_push` -> `uploading_chunks` and
+	// racing to upload chunks against the same upload_id.
+	$lock_key  = 'wp2pcl_op_lock';
+	$lock_ttl  = 30; // seconds
+	$lock_held = false;
+	if ( function_exists( 'get_transient' ) ) {
+		if ( false !== get_transient( $lock_key ) ) {
+			$result['status'] = 0;
+			$result['busy']   = true;
+			return array(
+				'operation' => $operation,
+				'result'    => $result,
+			);
+		}
+		set_transient( $lock_key, 1, $lock_ttl );
+		$lock_held = true;
+	}
+
+	try {
+
 	if ( 'upload' === $operation['operation'] ) {
 		wp2pclouddebugger::log( 'uploading' );
 	} else {
@@ -589,6 +691,9 @@ function wp2pcl_event_processor(): array {
 				$upload_id    = intval( $operation['upload_id'] );
 				$offset       = intval( $operation['offset'] );
 				$upload_files = json_decode( $upload_files, true );
+				if ( ! is_array( $upload_files ) ) {
+					$upload_files = array();
+				}
 
 				if ( 1 > count( $upload_files ) ) {
 
@@ -613,6 +718,8 @@ function wp2pcl_event_processor(): array {
 
 						$file_op = new wp2pcloudfilebackup( $plugin_path_base );
 						$file_op->clear_all_tmp_files();
+
+						WP2PcloudRatingPrompt::record_successful_backup();
 
 						if ( isset( $operation['mode'] ) && 'auto' === $operation['mode'] ) {
 							wp2pcloudfuncs::set_storred_val( PCLOUD_LAST_BACKUPDT, time() );
@@ -640,15 +747,21 @@ function wp2pcl_event_processor(): array {
 
 							$file_op = new wp2pcloudfilebackup( $plugin_path_base );
 
-							if ( isset( $operation['mode'] ) && 'manual' === $operation['mode'] ) {
-								$newoffset = $file_op->upload_chunk( $path, $folder_id, $upload_id, $offset, $operation['failures'] );
-							} else {
-								$time_limit = ini_get( 'max_execution_time' );
-								if ( ! is_bool( $time_limit ) && intval( $time_limit ) <= 0 ) {
-									$newoffset = $file_op->upload( $path, $folder_id, $upload_id, $offset );
-								} else {
+							try {
+								if ( isset( $operation['mode'] ) && 'manual' === $operation['mode'] ) {
 									$newoffset = $file_op->upload_chunk( $path, $folder_id, $upload_id, $offset, $operation['failures'] );
+								} else {
+									$time_limit = ini_get( 'max_execution_time' );
+									if ( ! is_bool( $time_limit ) && intval( $time_limit ) <= 0 ) {
+										$newoffset = $file_op->upload( $path, $folder_id, $upload_id, $offset );
+									} else {
+										$newoffset = $file_op->upload_chunk( $path, $folder_id, $upload_id, $offset, $operation['failures'] );
+									}
 								}
+							} catch ( Exception $e ) {
+								wp2pclouddebugger::log( 'event_processor() upload exception: ' . $e->getMessage() );
+								wp2pcloudlogger::info( 'Upload error: ' . $e->getMessage() );
+								$newoffset = $offset; // Counts as a failure via the <= check below.
 							}
 
 							$result['newoffset']     = $newoffset;
@@ -715,17 +828,26 @@ function wp2pcl_event_processor(): array {
 
 									wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='upload_completed_wait_next' style='color: green'>File upload completed! Please wait for the next file to be uploaded!</span>" );
 
-									$upload = $file_op->create_upload();
-
-									if ( ! is_object( $upload ) || ! property_exists( $upload, 'uploadid' ) ) {
-										wp2pclouddebugger::log( 'File -> upload -> "createUpload" not returning the expected data!' );
-										throw new Exception( 'File -> upload -> "createUpload" not returning the expected data!' );
-									} else {
-										$operation['current_file'] = $new_file_index;
-										$operation['upload_id']    = $upload->uploadid;
-										$operation['failures']     = 0;
-										$operation['offset']       = 0;
+									try {
+										$upload = $file_op->create_upload();
+									} catch ( Exception $e ) {
+										wp2pclouddebugger::log( 'event_processor() create_upload failed: ' . $e->getMessage() );
+										wp2pcloudlogger::info( "<span style='color: red'>ERROR:</span> " . esc_html( $e->getMessage() ) );
+										$file_op->clear_all_tmp_files();
+										if ( isset( $operation['mode'] ) && 'auto' === $operation['mode'] ) {
+											wp2pcloudfuncs::set_storred_val( PCLOUD_LAST_BACKUPDT, time() );
+										}
+										wp2pcloudfuncs::set_operation();
+										return array(
+											'operation' => wp2pcloudfuncs::get_operation(),
+											'result'    => array( 'status' => 1, 'message' => $e->getMessage() ),
+										);
 									}
+
+									$operation['current_file'] = $new_file_index;
+									$operation['upload_id']    = $upload->uploadid;
+									$operation['failures']     = 0;
+									$operation['offset']       = 0;
 
 									wp2pcloudfuncs::set_operation( $operation );
 
@@ -736,6 +858,8 @@ function wp2pcl_event_processor(): array {
 
 									$file_op = new wp2pcloudfilebackup( $plugin_path_base );
 									$file_op->clear_all_tmp_files();
+
+									WP2PcloudRatingPrompt::record_successful_backup();
 
 									if ( isset( $operation['mode'] ) && 'auto' === $operation['mode'] ) {
 										wp2pcloudfuncs::set_storred_val( PCLOUD_LAST_BACKUPDT, time() );
@@ -761,8 +885,10 @@ function wp2pcl_event_processor(): array {
 				$file_op = new wp2pcloudfilerestore();
 
 				$archives = json_decode( $operation['archives'], true );
-				foreach ( $archives as $archive ) {
-					$file_op->extract( PCLOUD_TEMP_DIR . '/' . $archive['name'] );
+				if ( is_array( $archives ) ) {
+					foreach ( $archives as $archive ) {
+						$file_op->extract( PCLOUD_TEMP_DIR . '/' . $archive['name'] );
+					}
 				}
 
 				$operation['state'] = 'restoredb';
@@ -785,8 +911,10 @@ function wp2pcl_event_processor(): array {
 				$file_op = new wp2pcloudfilerestore();
 
 				$archives = json_decode( $operation['archives'], true );
-				foreach ( $archives as $archive ) {
-					$file_op->remove_files( PCLOUD_TEMP_DIR . '/' . $archive['name'] );
+				if ( is_array( $archives ) ) {
+					foreach ( $archives as $archive ) {
+						$file_op->remove_files( PCLOUD_TEMP_DIR . '/' . $archive['name'] );
+					}
 				}
 
 				wp2pcloudfuncs::set_operation();
@@ -804,6 +932,9 @@ function wp2pcl_event_processor(): array {
 				$archive_num = intval( $operation['archive_num'] );
 				$total_size  = intval( $operation['total_size'] );
 				$archives    = json_decode( $archives, true );
+				if ( ! is_array( $archives ) ) {
+					$archives = array();
+				}
 
 				if ( 1 > count( $archives ) ) {
 
@@ -841,30 +972,47 @@ function wp2pcl_event_processor(): array {
 					$newoffset           = $file_op->download_chunk_curl( $dwlurl, $offset, $archive_name );
 					$result['newoffset'] = $newoffset;
 
-					$operation['downloaded'] += $newoffset - $offset;
-
-					if ( $newoffset > 0 ) {
-
-						$operation['offset'] = $newoffset;
+					if ( $newoffset > $offset ) {
+						$operation['downloaded'] += $newoffset - $offset;
+						$operation['offset']      = $newoffset;
+						$operation['failures']    = 0;
 
 						$result['perc'] = 0;
-						if ( $size > 0 ) {
-							$result['perc'] = round( abs( $operation['downloaded'] / ( $operation['total_size'] / 100 ) ), 2 );
+						if ( $total_size > 0 ) {
+							$result['perc'] = round( abs( $operation['downloaded'] / ( $total_size / 100 ) ), 2 );
 						}
+					} else {
+						// No progress this tick — count as a failure so we can eventually abort.
+						$operation['failures'] = intval( $operation['failures'] ?? 0 ) + 1;
 					}
 
-					if ( $newoffset > $size ) {
+					if ( $newoffset >= $size ) {
 						$operation['archive_num'] = $archive_num + 1;
 						$operation['offset']      = 0;
+						$operation['failures']    = 0;
 					}
 
-					wp2pcloudfuncs::set_operation( $operation );
+					$max_num_failures = intval( wp2pcloudfuncs::get_storred_val( PCLOUD_MAX_NUM_FAILURES_NAME ) );
+					if ( intval( $operation['failures'] ?? 0 ) > $max_num_failures ) {
+						wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='too_many_failures'>ERROR: Too many failures, try to disable/enable the plugin !</span>" );
+						wp2pclouddebugger::log( 'Download failed - max_num_failures exceeded at archive ' . $archive_num . ' offset ' . $offset );
+						$file_op = new wp2pcloudfilerestore();
+						$file_op->remove_files( $archive_name );
+						wp2pcloudfuncs::set_operation();
+					} else {
+						wp2pcloudfuncs::set_operation( $operation );
+					}
 				}
 			}
 
 			if ( isset( $result['perc'] ) && $result['perc'] > 100 ) {
 				$result['perc'] = 100;
 			}
+		}
+	}
+	} finally {
+		if ( $lock_held && function_exists( 'delete_transient' ) ) {
+			delete_transient( $lock_key );
 		}
 	}
 
@@ -892,15 +1040,20 @@ function wp2pcl_perform_manual_backup(): void {
 	$wp2pcl_withmysql = wp2pcloudfuncs::get_storred_val( PCLOUD_SCHDATA_INCLUDE_MYSQL );
 	if ( ! empty( $wp2pcl_withmysql ) && 1 === intval( $wp2pcl_withmysql ) ) {
 		wp2pclouddebugger::log( 'Database backup will start now!' );
-		$b    = new wp2pclouddbbackup();
-		$file = $b->start();
-
-		if ( ! is_bool( $file ) ) {
-			$f->set_mysql_backup_filename( $file );
-			wp2pclouddebugger::log( 'Database backup - ready!' );
-		} else {
-			wp2pclouddebugger::log( 'Database backup - failed!' );
-			wp2pcloudlogger::info( "<span style='color: red' class='pcl_transl' data-i10nk='failed_to_backup_db'>Database backup - failed!</span>" );
+		try {
+			$b    = new wp2pclouddbbackup();
+			$file = $b->start();
+			if ( ! is_bool( $file ) ) {
+				$f->set_mysql_backup_filename( $file );
+				wp2pclouddebugger::log( 'Database backup - ready!' );
+			} else {
+				wp2pclouddebugger::log( 'Database backup - failed!' );
+				wp2pcloudlogger::info( "<span style='color: red' class='pcl_transl' data-i10nk='failed_to_backup_db'>Database backup - failed!</span>" );
+			}
+		} catch ( Exception $db_ex ) {
+			wp2pclouddebugger::log( 'Database backup constructor failed: ' . $db_ex->getMessage() );
+			wp2pcloudlogger::info( "<span style='color: red' class='pcl_transl' data-i10nk='failed_to_backup_db'>Database backup - failed!</span> " . esc_html( $db_ex->getMessage() ) );
+			// File backup will proceed without a DB snapshot.
 		}
 	}
 
@@ -965,36 +1118,44 @@ function wp2pcl_run_pcloud_backup_hook(): void {
 	$after_hour  = wp2pcloudfuncs::get_storred_val( PCLOUD_SCHHOUR_FROM_KEY );
 	$before_hour = wp2pcloudfuncs::get_storred_val( PCLOUD_SCHHOUR_TO_KEY );
 
-	$rejected = false;
+	$rejected       = false;
+	$reject_reasons = array(); // diagnostic — surfaced in debug log
 
 	if ( $lastbackupdt_tm > 0 ) {
 
 		if ( '2_minute' === $freq ) {
 			if ( $lastbackupdt_tm > ( time() - 120 ) ) {
-				$rejected = true;
+				$rejected         = true;
+				$reject_reasons[] = 'freq=2_minute, last=' . $lastbackupdt_tm . ' < 120s ago';
 			}
 		} elseif ( '1_hour' === $freq ) {
 			if ( $lastbackupdt_tm > ( time() - 3600 ) ) {
-				$rejected = true;
+				$rejected         = true;
+				$reject_reasons[] = 'freq=1_hour, last=' . $lastbackupdt_tm . ' < 1h ago';
 			}
 		} elseif ( '4_hours' === $freq ) {
 			if ( $lastbackupdt_tm > ( time() - ( 3600 * 4 ) ) ) {
-				$rejected = true;
+				$rejected         = true;
+				$reject_reasons[] = 'freq=4_hours, last=' . $lastbackupdt_tm . ' < 4h ago';
 			}
 		} elseif ( 'daily' === $freq ) {
 			if ( $lastbackupdt_tm > ( time() - 86400 ) ) {
-				$rejected = true;
+				$rejected         = true;
+				$reject_reasons[] = 'freq=daily, last=' . $lastbackupdt_tm . ' < 24h ago';
 			}
 		} elseif ( 'weekly' === $freq ) {
 			if ( $lastbackupdt_tm > strtotime( '-1 week' ) ) {
-				$rejected = true;
+				$rejected         = true;
+				$reject_reasons[] = 'freq=weekly, last=' . $lastbackupdt_tm . ' < 1w ago';
 			}
 		} elseif ( 'monthly' === $freq ) {
 			if ( $lastbackupdt_tm > strtotime( '-1 month' ) ) {
-				$rejected = true;
+				$rejected         = true;
+				$reject_reasons[] = 'freq=monthly, last=' . $lastbackupdt_tm . ' < 1mo ago';
 			}
-		} else { // Unexpected value for $freq. or none, skipping.
-			$rejected = true;
+		} else {
+			$rejected         = true;
+			$reject_reasons[] = 'unexpected freq value: ' . $freq;
 		}
 	}
 
@@ -1003,22 +1164,41 @@ function wp2pcl_run_pcloud_backup_hook(): void {
 	$before_hour  = intval( $before_hour );
 
 	if ( $after_hour >= 0 && $current_hour < $after_hour ) {
-		$rejected = true;
+		$rejected         = true;
+		$reject_reasons[] = 'hour_window: current_hour=' . $current_hour . ' < after_hour=' . $after_hour;
 	}
 	if ( $before_hour >= 0 && $current_hour >= $before_hour ) {
-		$rejected = true;
+		$rejected         = true;
+		$reject_reasons[] = 'hour_window: current_hour=' . $current_hour . ' >= before_hour=' . $before_hour;
 	}
 
 	$operation = wp2pcloudfuncs::get_operation();
 
-	if ( $rejected ) {
+	// If there's an auto backup already in progress (any state other than 'nothing'),
+	// always let it continue — even if the frequency/hour-window check says "not yet".
+	$auto_in_progress = isset( $operation['operation'] )
+		&& 'nothing' !== $operation['operation']
+		&& isset( $operation['mode'] )
+		&& 'auto' === $operation['mode'];
 
-		if ( isset( $operation['operation'] ) && ( 'upload' === $operation['operation'] ) && ( 'auto' === $operation['mode'] ) ) {
-			wp2pcloudfuncs::set_operation();
-		}
-
+	if ( $auto_in_progress ) {
+		wp2pclouddebugger::log( 'cron_hook() - auto backup in progress (state=' . ( $operation['state'] ?? '?' ) . '), continuing.' );
+		wp2pcl_perform_auto_backup();
 		return;
 	}
+
+	if ( $rejected ) {
+		return;
+	}
+
+	wp2pclouddebugger::log(
+		'cron_hook() - PASSED all gates. freq=' . $freq
+		. ' last_backup=' . $lastbackupdt_tm
+		. ' (' . ( $lastbackupdt_tm > 0 ? gmdate( 'Y-m-d H:i:s', $lastbackupdt_tm ) : 'never' ) . ')'
+		. ' hours=' . $after_hour . '-' . $before_hour
+		. ' current_hour=' . $current_hour
+		. ' op=' . ( $operation['operation'] ?? '?' )
+	);
 
 	if ( isset( $operation['operation'] ) && ( 'nothing' === $operation['operation'] ) ) {
 
@@ -1039,8 +1219,8 @@ function wp2pcl_run_pcloud_backup_hook(): void {
 
 		wp2pcloudfuncs::set_storred_val( 'wp2pcl_operation', $json_data );
 
-		if ( ! wp_next_scheduled( 'init_autobackup' ) ) { // This will always be false.
-			wp_schedule_event( time(), '10_sec', 'init_autobackup', array( false ) );
+		if ( ! wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() ) ) { // This will always be false.
+			wp_schedule_event( time(), '2_minute', 'init_autobackup', wp2pcl_cron_args() );
 		}
 	} else {
 
@@ -1097,10 +1277,7 @@ function wp2pcloud_display_settings(): void {
 	wp_enqueue_script( 'wp2pcl-scr', plugins_url( '/assets/js/wp2pcl.js', __FILE__ ), array(), $static_files_ver, true );
 	wp_enqueue_style( 'wpb2pcloud', plugins_url( '/assets/css/wpb2pcloud.css', __FILE__ ), array(), $static_files_ver );
 
-	$auth_key = wp2pcloudfuncs::get_storred_val( PCLOUD_AUTH_KEY );
-
 	$data = array(
-		'pcloud_auth'       => $auth_key,
 		'blog_name'         => get_bloginfo( 'name' ),
 		'blog_url'          => get_bloginfo( 'url' ),
 		'archive_icon'      => plugins_url( '/assets/img/zip.png', __FILE__ ),
@@ -1143,9 +1320,9 @@ function wp2pcl_install(): void {
 	wp2pcloudfuncs::get_storred_val( PCLOUD_MAX_NUM_FAILURES_NAME, strval( $max_num_failures ) );
 	wp2pcloudfuncs::get_storred_val( PCLOUD_ASYNC_UPDATE_VAL );
 	wp2pcloudfuncs::get_storred_val( PCLOUD_BACKUP_FILE_INDEX );
-	wp2pcloudfuncs::get_storred_val( PCLOUD_OAUTH_CLIENT_ID );
-	wp2pcloudfuncs::get_storred_val( PCLOUD_TEMP_DIR );
-	wp2pcloudfuncs::get_storred_val( PCLOUD_PLUGIN_MIN_PHP_VERSION );
+	// Note: PCLOUD_OAUTH_CLIENT_ID, PCLOUD_TEMP_DIR and PCLOUD_PLUGIN_MIN_PHP_VERSION are
+	// constant *values* (not option names). Passing them into get_storred_val used to create
+	// junk rows in wp_options keyed by the value itself (e.g. "beFbFDM0paj"). No longer done.
 
 	add_filter(
 		'cron_schedules',
@@ -1171,11 +1348,29 @@ function wp2pcl_install(): void {
 		}
 	);
 
-	wp_schedule_event( time(), '2_minute', 'init_autobackup', array( false ) );
+	wp_schedule_event( time(), '2_minute', 'init_autobackup', wp2pcl_cron_args() );
+
+	WP2PcloudRatingPrompt::on_activate();
 }
 
 /**
- * Cleaning up after uninstall of the plugin
+ * Deactivation hook. Stops scheduled backups but preserves the user's configuration
+ * (OAuth token, schedule, retention settings, etc.) so reactivation is transparent.
+ *
+ * Previously this wiped every plugin option. That turned any troubleshooting deactivation
+ * into a full re-setup including re-authentication.
+ *
+ * @return void
+ * @noinspection PhpUnused
+ */
+function wp2pcl_deactivate(): void {
+	wp_clear_scheduled_hook( 'init_autobackup', wp2pcl_cron_args() );
+	spl_autoload_unregister( '\Pcloud\Autoloader::loader' );
+}
+
+/**
+ * Uninstall hook. Runs only when the plugin is explicitly deleted by the admin.
+ * This is the correct place to wipe every plugin option.
  *
  * @return void
  * @noinspection PhpUnused
@@ -1200,11 +1395,9 @@ function wp2pcl_uninstall(): void {
 	delete_option( PCLOUD_USEDQUOTA );
 	delete_option( PCLOUD_ASYNC_UPDATE_VAL );
 	delete_option( PCLOUD_BACKUP_FILE_INDEX );
-	delete_option( PCLOUD_OAUTH_CLIENT_ID );
-	delete_option( PCLOUD_TEMP_DIR );
-	delete_option( PCLOUD_PLUGIN_MIN_PHP_VERSION );
-	wp_clear_scheduled_hook( 'init_autobackup' );
-	spl_autoload_unregister( '\Pcloud\Autoloader::loader' );
+	delete_option( 'wp2pcl_plugin_version' );
+	WP2PcloudRatingPrompt::on_uninstall();
+	wp_clear_scheduled_hook( 'init_autobackup', wp2pcl_cron_args() );
 }
 
 /**
@@ -1218,10 +1411,6 @@ function wp2pcl_uninstall(): void {
 function backup_to_pcloud_cron_schedules( ?array $schedules ): array {
 
 	$new_schedules = array(
-		'30_sec'   => array(
-			'interval' => 30,
-			'display'  => __( '30 seconds' ),
-		),
 		'2_minute' => array(
 			'interval' => 120,
 			'display'  => __( '2 minute' ),
@@ -1248,7 +1437,7 @@ function backup_to_pcloud_cron_schedules( ?array $schedules ): array {
 		),
 	);
 
-	return array_merge( $schedules, $new_schedules );
+	return array_merge( (array) $schedules, $new_schedules );
 }
 
 /**
@@ -1274,13 +1463,13 @@ function pcl_verify_directory_structure(): void {
 		wp2pcloudfuncs::set_storred_val( PCLOUD_BACKUP_FILE_INDEX, $backup_file_index );
 	}
 
-	$apiep = 'https://' . rtrim( $hostname );
+	$apiep = 'https://' . $hostname;
 	$url   = $apiep . '/listfolder?path=/' . PCLOUD_BACKUP_DIR . '&access_token=' . $authkey;
 
 	$response = wp_remote_get( $url );
 	if ( is_array( $response ) && ! is_wp_error( $response ) ) {
 		$response_body_list = json_decode( $response['body'] );
-		if ( property_exists( $response_body_list, 'result' ) ) {
+		if ( is_object( $response_body_list ) && property_exists( $response_body_list, 'result' ) ) {
 			$resp_result = intval( $response_body_list->result );
 			if ( 2005 === $resp_result ) {
 
@@ -1289,8 +1478,10 @@ function pcl_verify_directory_structure(): void {
 				if ( is_array( $backup_directories ) && 0 < count( $backup_directories ) ) {
 					$url                       = $apiep . '/createfolder?path=/' . $backup_directories[0] . '&name=' . $backup_directories[0] . '&access_token=' . $authkey;
 					$response_main_folder      = wp_remote_get( $url );
-					$response_main_folder_body = json_decode( $response_main_folder['body'] );
-					if ( property_exists( $response_main_folder_body, 'result' ) && ( 0 === intval( $response_main_folder_body->result ) ) ) {
+					$response_main_folder_body = is_array( $response_main_folder ) && ! is_wp_error( $response_main_folder )
+						? json_decode( wp_remote_retrieve_body( $response_main_folder ) )
+						: null;
+					if ( is_object( $response_main_folder_body ) && property_exists( $response_main_folder_body, 'result' ) && ( 0 === intval( $response_main_folder_body->result ) ) ) {
 						$url = $apiep . '/createfolder?path=/' . PCLOUD_BACKUP_DIR . '&name=' . $backup_directories[1] . '&access_token=' . $authkey;
 						wp_remote_get( $url );
 					}
@@ -1301,20 +1492,6 @@ function pcl_verify_directory_structure(): void {
 }
 
 add_filter( 'cron_schedules', 'backup_to_pcloud_cron_schedules' );
-
-if ( ! function_exists( 'wp2pcl_load_scripts' ) ) {
-
-	/**
-	 * We are attempting to load main plugin js file.
-	 *
-	 * @return void
-	 * @noinspection PhpUnused
-	 */
-	function wp2pcl_load_scripts(): void {
-		wp_register_script( 'wp2pcl-wp2pcljs', plugins_url( '/assets/js/wp2pcl.js', __FILE__ ), array(), '2.0.0.1', true );
-		wp_enqueue_script( 'jquery' );
-	}
-}
 
 if ( ! function_exists( 'pcloud_plugin_check' ) ) {
 
@@ -1378,28 +1555,125 @@ if ( ! function_exists( 'pcloud_plugin_php_memory_limit_error' ) ) {
 	}
 }
 
-// Hook into 'admin_init' to check PHP version as early as possible.
+/**
+ * Run any pending upgrade routines. WordPress does NOT fire the activation hook on
+ * plugin updates — only on explicit activate. So anything that must happen once per
+ * new version (cron re-registration, new options seeding) goes here.
+ *
+ * @return void
+ */
+function wp2pcl_maybe_upgrade(): void {
+
+	$version_key     = 'wp2pcl_plugin_version';
+	$current_version = '2.0.2';
+	$stored_version  = get_option( $version_key, '' );
+
+	if ( $stored_version === $current_version ) {
+		return; // Already up to date — nothing to do.
+	}
+
+	// --- Ensure cron is registered (may have been lost on deactivate/reactivate
+	//     during an older version, or simply never existed for fresh upgrades). ---
+	$cron_was_missing = false;
+	if ( ! wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() ) ) {
+		wp_schedule_event( time(), '2_minute', 'init_autobackup', wp2pcl_cron_args() );
+		$cron_was_missing = true;
+	}
+
+	// --- Seed options introduced in 2.0.2 ---
+	WP2PcloudRatingPrompt::on_activate();
+
+	// --- Mark as upgraded ---
+	update_option( $version_key, $current_version, true );
+
+	// Diagnostic — visible in the debug panel on the plugin page.
+	wp2pclouddebugger::log(
+		'wp2pcl_maybe_upgrade() - upgraded to ' . $current_version
+		. ' (from ' . ( $stored_version ?: 'none' ) . ')'
+		. ( $cron_was_missing ? ' — cron was MISSING, re-registered init_autobackup' : ' — cron already scheduled' )
+		. ' — next run: ' . ( wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() ) ?: 'FAILED' )
+	);
+}
+
+/**
+ * Ensure init_autobackup is always registered.
+ *
+ * wp2pcl_maybe_upgrade() only re-schedules cron on a version change. Once the
+ * stored version matches, that path is a no-op — and the plugin has no way to
+ * recover if init_autobackup has been cleared since (deactivate/reactivate of
+ * another plugin, conflict with a cron-management tool, direct DB edit). This
+ * runs on every admin pageview, so a missing event is restored on the next
+ * admin visit and WP core's spawn_cron() then fires it normally.
+ *
+ * Cost: one autoloaded option read per admin pageview (already in cache).
+ *
+ * @return void
+ */
+function wp2pcl_ensure_cron_scheduled(): void {
+
+	if ( wp_doing_ajax() || wp_doing_cron() || wp_installing() ) {
+		return;
+	}
+
+	if ( false === wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() ) ) {
+		wp_schedule_event( time(), '2_minute', 'init_autobackup', wp2pcl_cron_args() );
+		wp2pclouddebugger::log( 'wp2pcl_ensure_cron_scheduled() - init_autobackup was missing, re-registered' );
+	}
+}
+
+// Hook into 'admin_init' to check PHP version and run upgrades as early as possible.
+add_action( 'admin_init', 'wp2pcl_maybe_upgrade' );
+add_action( 'admin_init', 'wp2pcl_ensure_cron_scheduled' );
 add_action( 'admin_init', 'pcloud_plugin_check' );
 
 register_activation_hook( __FILE__, 'wp2pcl_install' );
-register_deactivation_hook( __FILE__, 'wp2pcl_uninstall' );
+register_deactivation_hook( __FILE__, 'wp2pcl_deactivate' );
+register_uninstall_hook( __FILE__, 'wp2pcl_uninstall' );
 add_action( 'admin_menu', 'backup_to_pcloud_admin_menu' );
-add_action( 'wp_enqueue_scripts', 'wp2pcl_load_scripts' );
 add_action( 'init_autobackup', 'wp2pcl_run_pcloud_backup_hook' );
 if ( is_admin() ) {
 	add_action( 'wp_ajax_pcloudbackup', 'wp2pcl_ajax_process_request' );
+	add_action( 'wp_ajax_wp2pcl_rating_dismiss', array( WP2PcloudRatingPrompt::class, 'handle_ajax' ) );
+	add_action( 'admin_notices', array( WP2PcloudRatingPrompt::class, 'maybe_render' ) );
 }
 
-if( ! function_exists( 'debug_wp_remote_post_and_get_request' ) ) :
+if ( ! function_exists( 'debug_wp_remote_post_and_get_request' ) ) :
+	/**
+	 * Debug hook for pCloud HTTP calls. Redacts access_token from URL/body before logging.
+	 *
+	 * @param mixed  $response HTTP response or WP_Error.
+	 * @param string $context  Context.
+	 * @param string $class    Transport class.
+	 * @param array  $request  Request args.
+	 * @param string $url      Request URL.
+	 */
 	function debug_wp_remote_post_and_get_request( $response, $context, $class, $request, $url ): void {
 
-		if (str_contains($url, 'pcloud')) {
-			error_log( '------------------------------------------------------------------------------------------' );
-			error_log( 'URL: ' . $url );
-			error_log( 'Request: ' . json_encode( $request ) );
-			error_log( 'Response: ' . json_encode( $response ) );
-			// error_log( $context );
+		if ( ! PCLOUD_DEBUG || ! str_contains( $url, 'pcloud' ) ) {
+			return;
 		}
+
+		$redact = static function ( $value ) {
+			if ( is_string( $value ) ) {
+				return preg_replace( '/access_token=[^&\s"\']+/i', 'access_token=REDACTED', $value );
+			}
+			if ( is_array( $value ) ) {
+				return array_map( static function ( $v ) {
+					return is_string( $v ) ? preg_replace( '/access_token=[^&\s"\']+/i', 'access_token=REDACTED', $v ) : $v;
+				}, $value );
+			}
+			return $value;
+		};
+
+		$safe_url      = $redact( $url );
+		$safe_request  = $redact( $request );
+		$safe_response = is_array( $response ) ? $response : (string) $response;
+		$safe_response = $redact( $safe_response );
+
+		error_log( '------------------------------------------------------------------------------------------' );
+		error_log( 'URL: ' . $safe_url );
+		error_log( 'Request: ' . wp_json_encode( $safe_request ) );
+		error_log( 'Response: ' . wp_json_encode( $safe_response ) );
 	}
 	add_action( 'http_api_debug', 'debug_wp_remote_post_and_get_request', 10, 5 );
 endif;

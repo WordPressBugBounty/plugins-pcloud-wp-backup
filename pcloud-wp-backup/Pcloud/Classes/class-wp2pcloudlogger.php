@@ -52,17 +52,31 @@ class WP2PcloudLogger {
 	 */
 	public static function info( ?string $new_data ): void {
 
-		$new_data = trim( strip_tags( $new_data, '<span><strong><br><em>' ) );
+		$new_data = trim( wp_kses(
+			(string) $new_data,
+			array(
+				'span'   => array( 'class' => true, 'data-i10nk' => true, 'style' => true ),
+				'strong' => array(),
+				'br'     => array(),
+				'em'     => array(),
+			)
+		) );
 		if ( strlen( $new_data ) < 2 ) {
 			return;
 		}
 
-		$current_data = wp2pcloudfuncs::get_storred_val( PCLOUD_LOG );
-
+		$current_data  = (string) wp2pcloudfuncs::get_storred_val( PCLOUD_LOG );
 		$current_data .= '<br/>' . gmdate( 'Y-m-d H:i:s' ) . ' - ' . $new_data;
 
-		wp2pcloudfuncs::set_storred_val( PCLOUD_LOG, $current_data );
+		// Cap user log at ~20 KB; trim to the last 15 KB when exceeded. Previously the log
+		// grew unbounded until something read it — every info() call rewrote the full blob
+		// to wp_options, which scaled linearly with log length.
+		$max = 20000;
+		if ( strlen( $current_data ) > $max ) {
+			$current_data = substr( $current_data, -15000 );
+		}
 
+		wp2pcloudfuncs::set_storred_val( PCLOUD_LOG, $current_data );
 	}
 
 	/**
@@ -74,7 +88,15 @@ class WP2PcloudLogger {
 	 */
 	public static function notification( ?string $new_message ): void {
 
-		$new_message = trim( strip_tags( $new_message, '<span><strong><br><em>' ) );
+		$new_message = trim( wp_kses(
+			(string) $new_message,
+			array(
+				'span'   => array( 'class' => true, 'data-i10nk' => true, 'style' => true ),
+				'strong' => array(),
+				'br'     => array(),
+				'em'     => array(),
+			)
+		) );
 		if ( strlen( $new_message ) < 2 ) {
 			return;
 		}

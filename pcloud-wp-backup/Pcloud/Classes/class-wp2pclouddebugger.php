@@ -34,18 +34,12 @@ class WP2PcloudDebugger {
 	 * @return string
 	 */
 	public static function read_last_log( ?bool $as_json = true ): string {
-		$log = wp2pcloudfuncs::get_storred_val( PCLOUD_DBG_LOG );
-
-		if ( strlen( $log ) > 50000 ) {
-			$log = substr( $log, 20000 );
-			wp2pcloudfuncs::set_storred_val( PCLOUD_DBG_LOG, $log );
-		}
+		$log = (string) wp2pcloudfuncs::get_storred_val( PCLOUD_DBG_LOG );
 
 		if ( $as_json ) {
 			return wp_json_encode( array( 'log' => $log ) );
-		} else {
-			return $log;
 		}
+		return $log;
 	}
 
 	/**
@@ -57,12 +51,20 @@ class WP2PcloudDebugger {
 	 */
 	public static function log( ?string $new_data ): void {
 
-		$new_data = trim( strip_tags( $new_data, '<span><strong><br><em>' ) );
+		$new_data = trim( wp_kses(
+			(string) $new_data,
+			array(
+				'span'   => array( 'class' => true, 'data-i10nk' => true, 'style' => true ),
+				'strong' => array(),
+				'br'     => array(),
+				'em'     => array(),
+			)
+		) );
 		if ( strlen( $new_data ) < 2 ) {
 			return;
 		}
 
-		$current_data = wp2pcloudfuncs::get_storred_val( PCLOUD_DBG_LOG );
+		$current_data = (string) wp2pcloudfuncs::get_storred_val( PCLOUD_DBG_LOG );
 		$mem_usage    = wp2pcloudfuncs::memory_usage();
 
 		if ( 'uploading' === $new_data ) {
@@ -72,6 +74,13 @@ class WP2PcloudDebugger {
 			}
 		} else {
 			$current_data .= '<br/>' . gmdate( 'Y-m-d H:i:s' ) . ' [' . $mem_usage . '] - ' . $new_data;
+		}
+
+		// Trim on write (not on read). Previously the log grew unbounded unless a reader
+		// happened to request it, which never happens when debug UI is closed.
+		$max = 50000;
+		if ( strlen( $current_data ) > $max ) {
+			$current_data = substr( $current_data, -30000 );
 		}
 
 		wp2pcloudfuncs::set_storred_val( PCLOUD_DBG_LOG, $current_data );

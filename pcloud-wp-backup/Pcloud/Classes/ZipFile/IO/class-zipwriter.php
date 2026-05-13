@@ -82,7 +82,12 @@ class ZipWriter {
 
 			$file_path = $zip_entry->get_path();
 
-			if ( ! file_exists( $file_path ) || ! is_readable( $file_path ) ) {
+			// For file-backed entries whose source vanished between add_file() and save,
+			// drop the entry from the container (so the CD doesn't list it either) AND log
+			// — previously this was silent, leaving users with incomplete restores without
+			// any indication of which files were skipped.
+			if ( '' !== $file_path && ( ! file_exists( $file_path ) || ! is_readable( $file_path ) ) ) {
+				wp2pclouddebugger::log( 'ZipWriter: entry dropped, source file gone or unreadable: ' . $zip_entry->get_name() );
 				$this->zip_container->delete_entry( $zip_entry );
 				continue;
 			}
@@ -97,7 +102,7 @@ class ZipWriter {
 	}
 
 	/**
-	 * Write local header.
+	 * Write a local header.
 	 *
 	 * @param resource $out_stream Out stream.
 	 * @param ZipEntry $entry Zip entry.
@@ -276,11 +281,23 @@ class ZipWriter {
 			rewind( $entry_stream );
 		}
 
-		$uncompressed_size = $entry->get_uncompressed_size();
+		$declared_uncompressed = $entry->get_uncompressed_size();
 
 		$pos_before_write = ftell( $out_stream );
 		$context_filter   = $this->append_compression_filter( $out_stream, $entry );
-		$checksum         = $this->write_and_count_checksum( $entry_stream, $out_stream, $uncompressed_size );
+
+		// Reads up to $declared_uncompressed bytes; returns both the CRC of what was actually
+		// read AND the actual byte count. Previously the caller assumed bytes_read equaled
+		// the declared size, which silently corrupted entries whose source file changed
+		// between add_file() and save (common on live WordPress sites — log rotation, cache
+		// cleanup, transient expiry writing under ABSPATH during the backup).
+		$actual_uncompressed = 0;
+		$checksum            = $this->write_and_count_checksum(
+			$entry_stream,
+			$out_stream,
+			$declared_uncompressed,
+			$actual_uncompressed
+		);
 
 		if ( null !== $context_filter ) {
 			stream_filter_remove( $context_filter );
@@ -289,6 +306,23 @@ class ZipWriter {
 
 		fseek( $out_stream, 0, SEEK_END );
 		$compressed_size = ftell( $out_stream ) - $pos_before_write;
+
+		// Refresh the entry's uncompressed size to match what was actually streamed. Without
+		// this, the local file header and central directory would keep the stale pre-write
+		// size and decompression would yield fewer (or more) bytes than headers claim —
+		// strict ZIP readers then reject the archive as corrupt.
+		if ( $actual_uncompressed !== $declared_uncompressed ) {
+			wp2pclouddebugger::log(
+				sprintf(
+					'ZipWriter: entry "%s" changed size during backup — declared %d, streamed %d. Header refreshed.',
+					$entry->get_name(),
+					$declared_uncompressed,
+					$actual_uncompressed
+				)
+			);
+			$entry->set_uncompressed_size( $actual_uncompressed );
+		}
+		$uncompressed_size = $actual_uncompressed;
 
 		$entry->set_compressed_size( $compressed_size );
 		$entry->set_crc( $checksum );
@@ -358,24 +392,39 @@ class ZipWriter {
 	}
 
 	/**
-	 * Write and count checksum.
+	 * Stream `$size` bytes from the input, compute CRC-32 over the bytes actually read,
+	 * and report the true count via the by-reference `$bytes_read` out-parameter.
 	 *
-	 * @param resource $in_stream Input stream.
-	 * @param resource $out_stream Output stream.
-	 * @param int      $size Output stream.
-	 * @return int
+	 * The previous implementation advanced its internal offset by the *requested* chunk
+	 * size instead of `strlen($buffer)`, so a source file that shrank between add_file()
+	 * and save (log rotation, cache cleanup, transient expiry — routine on a live site)
+	 * would produce an entry whose header claimed more bytes than the payload actually
+	 * contained, breaking strict extractors.
+	 *
+	 * @param resource $in_stream  Input stream.
+	 * @param resource $out_stream Output stream (may have a compression filter attached).
+	 * @param int      $size       Maximum number of bytes to read (the declared size of the entry).
+	 * @param int      $bytes_read Out-parameter receiving the actual number of bytes read.
+	 * @return int CRC-32 of the bytes that were actually read.
 	 */
-	private function write_and_count_checksum( $in_stream, $out_stream, int $size ): int {
+	private function write_and_count_checksum( $in_stream, $out_stream, int $size, int &$bytes_read = 0 ): int {
 
 		$context_hash = hash_init( 'crc32b' );
-		$offset       = 0;
+		$bytes_read   = 0;
 
-		while ( $offset < $size ) {
-			$read   = min( self::CHUNK_SIZE, $size - $offset );
-			$buffer = fread( $in_stream, $read );
+		while ( $bytes_read < $size ) {
+			$want   = min( self::CHUNK_SIZE, $size - $bytes_read );
+			$buffer = fread( $in_stream, $want );
+
+			if ( false === $buffer || '' === $buffer ) {
+				// EOF reached before the declared size — source file shrank. Stop, let the
+				// caller see the real $bytes_read and refresh the entry's headers.
+				break;
+			}
+
 			fwrite( $out_stream, $buffer );
 			hash_update( $context_hash, $buffer );
-			$offset += $read;
+			$bytes_read += strlen( $buffer );
 		}
 
 		return (int) hexdec( hash_final( $context_hash ) );
@@ -437,7 +486,7 @@ class ZipWriter {
 	}
 
 	/**
-	 * Write data descriptor.
+	 * Write a data descriptor.
 	 *
 	 * @param resource $out_stream Output stream.
 	 * @param ZipEntry $entry Zip entry.
@@ -485,7 +534,7 @@ class ZipWriter {
 	}
 
 	/**
-	 * Write central directory block.
+	 * Write a central directory block.
 	 *
 	 * @param resource $out_stream Output stream.
 	 * @return void
@@ -524,7 +573,7 @@ class ZipWriter {
 
 			if ( $compressed_size >= ZipConstants::ZIP64_MAGIC ) {
 				$zip64_extra_field->set_compressed_size( $compressed_size );
-				$uncompressed_size = ZipConstants::ZIP64_MAGIC;
+				$compressed_size = ZipConstants::ZIP64_MAGIC;
 			}
 
 			if ( $local_header_offset >= ZipConstants::ZIP64_MAGIC ) {
@@ -601,7 +650,7 @@ class ZipWriter {
 	}
 
 	/**
-	 * Write end of central directory block.
+	 * Write the end of the central directory block.
 	 *
 	 * @param resource $out_stream Output stream.
 	 * @param int      $central_directory_offset Central directory offset.

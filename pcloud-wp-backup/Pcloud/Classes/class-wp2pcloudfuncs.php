@@ -18,35 +18,26 @@ class WP2PcloudFuncs {
 	 */
 	public static function set_execution_limits(): void {
 
-		if ( function_exists( 'memory_limit' ) && wp_is_ini_value_changeable( 'memory_limit' ) ) {
-			/**
-			 * We will try to increase the memory limit to "unlimited".
-			 *
-			 * @noinspection PhpUndefinedFunctionInspection
-			 */
-			memory_limit( - 1 );
+		// Lift the memory limit for the duration of the backup, where the host allows it.
+		// (Previous revisions checked function_exists('memory_limit'), which is not a PHP
+		// function — the branch was dead and memory was never actually raised.)
+		if ( wp_is_ini_value_changeable( 'memory_limit' ) ) {
+			@ini_set( 'memory_limit', '-1' ); // phpcs:ignore
 		}
+
 		if ( function_exists( 'ignore_user_abort' ) ) {
 			ignore_user_abort( true );
 		}
 		if ( function_exists( 'set_time_limit' ) ) {
-			set_time_limit( 0 );
+			@set_time_limit( 0 ); // phpcs:ignore
 		}
 
-		if ( function_exists( 'ini_get' ) ) {
-			if ( false === wp_is_ini_value_changeable( 'memory_limit' ) ) {
-				$current_limit = ini_get( 'memory_limit' );
-				if ( ! defined( 'WP_MEMORY_LIMIT' ) ) {
-					define( 'WP_MEMORY_LIMIT', $current_limit );
-				}
-			} elseif ( is_multisite() ) {
-				if ( ! defined( 'WP_MEMORY_LIMIT' ) ) {
-					define( 'WP_MEMORY_LIMIT', '256M' );
-				}
+		if ( ! defined( 'WP_MEMORY_LIMIT' ) ) {
+			$current_limit = ini_get( 'memory_limit' );
+			if ( false === wp_is_ini_value_changeable( 'memory_limit' ) && is_string( $current_limit ) && '' !== $current_limit ) {
+				define( 'WP_MEMORY_LIMIT', $current_limit );
 			} else {
-				if ( ! defined( 'WP_MEMORY_LIMIT' ) ) {
-					define( 'WP_MEMORY_LIMIT', '256M' );
-				}
+				define( 'WP_MEMORY_LIMIT', '256M' );
 			}
 		}
 	}
@@ -85,7 +76,7 @@ class WP2PcloudFuncs {
 
 		$test_val = get_option( $key, false );
 		if ( is_bool( $test_val ) && ! $test_val ) {
-			add_option( $key, $default );
+			add_option( $key, $default, '', self::should_autoload( $key ) ? 'yes' : 'no' );
 
 			return $default;
 		}
@@ -96,7 +87,7 @@ class WP2PcloudFuncs {
 	/**
 	 * Set storred value in WP options system
 	 *
-	 * @param string $key Storred item key, must be a string.
+	 * @param string $key   Storred item key, must be a string.
 	 * @param mixed  $value Storred item value.
 	 */
 	public static function set_storred_val( string $key, mixed $value ): void {
@@ -105,12 +96,35 @@ class WP2PcloudFuncs {
 
 		$test_val = get_option( $key, false );
 		if ( is_bool( $test_val ) && ! $test_val ) {
-			add_option( $key, strval( $value ) );
-		} else {
-			if ( $test_val !== $value ) {
-				update_option( $key, strval( $value ) );
-			}
+			add_option( $key, strval( $value ), '', self::should_autoload( $key ) ? 'yes' : 'no' );
+		} elseif ( strval( $test_val ) !== strval( $value ) ) {
+			update_option( $key, strval( $value ) );
 		}
+	}
+
+	/**
+	 * Decide whether a given option key should be autoloaded on every WP request.
+	 *
+	 * Small, always-read config options autoload. Large, hot-write operational options
+	 * (log, debug log, operation state JSON, async-update queue, notifications) do not.
+	 * Frontend page loads used to pay the cost of loading hundreds of kilobytes of backup
+	 * logs into memory just to render a blog post.
+	 *
+	 * @param string $key Option key.
+	 * @return bool
+	 */
+	private static function should_autoload( string $key ): bool {
+		static $no_autoload = null;
+		if ( null === $no_autoload ) {
+			$no_autoload = array(
+				PCLOUD_OPERATION,
+				PCLOUD_LOG,
+				PCLOUD_DBG_LOG,
+				PCLOUD_NOTIFICATIONS,
+				PCLOUD_ASYNC_UPDATE_VAL,
+			);
+		}
+		return ! in_array( $key, $no_autoload, true );
 	}
 
 	/**
@@ -145,7 +159,7 @@ class WP2PcloudFuncs {
 	 */
 	public static function set_operation( ?array $operation_data = array() ): void {
 
-		if ( count( $operation_data ) < 1 || empty( $operation_data ) ) {
+		if ( null === $operation_data || count( $operation_data ) < 1 ) {
 			$operation_data = array(
 				'operation' => 'nothing',
 				'state'     => 'sleep',
@@ -156,22 +170,23 @@ class WP2PcloudFuncs {
 			$operation_data['cleanat'] = time() + 5;
 		}
 
+		// Merge queued async-update items first, then let the caller's explicit values win.
+		// Previous revisions had this inverted (async clobbered caller), which meant any stale
+		// queue entry could silently reset `failures`, `offset`, or other progress fields.
+		$merged = array();
+
 		$waiting_async_items = self::get_storred_val( PCLOUD_ASYNC_UPDATE_VAL );
 		if ( ! empty( $waiting_async_items ) ) {
-
 			$items_to_update = json_decode( $waiting_async_items, true );
 			if ( is_array( $items_to_update ) ) {
-				foreach ( $items_to_update as $k => $v ) {
-					$operation_data[ $k ] = $v;
-				}
+				$merged = $items_to_update;
 			}
-
-			self::set_storred_val( PCLOUD_ASYNC_UPDATE_VAL, '' ); // Maximum number of failures.
+			self::set_storred_val( PCLOUD_ASYNC_UPDATE_VAL, '' );
 		}
 
-		$json_data = wp_json_encode( $operation_data );
+		$merged = array_merge( $merged, $operation_data );
 
-		self::set_storred_val( PCLOUD_OPERATION, $json_data );
+		self::set_storred_val( PCLOUD_OPERATION, wp_json_encode( $merged ) );
 	}
 
 	/**
@@ -203,17 +218,32 @@ class WP2PcloudFuncs {
 	}
 
 	/**
-	 * Format bytes to human-readable format
+	 * Format bytes to human-readable format.
 	 *
-	 * @param string|int $bytes Bytes to be made more human-readable.
+	 * Delegates to WP core's `size_format()`. The previous homegrown implementation was a
+	 * strlen-based factor calculation that produced wrong results at decimal boundaries
+	 * (e.g. 1,000,000 bytes reported as "0.95MB").
 	 *
+	 * @param string|int $bytes Bytes to be made human-readable.
 	 * @return string
 	 */
 	public static function format_bytes( $bytes ): string {
-		$size   = array( 'B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB' );
-		$factor = floor( ( strlen( $bytes ) - 1 ) / 3 );
-
-		return sprintf( '%.2f', $bytes / pow( 1024, $factor ) ) . $size[ $factor ];
+		$bytes = (int) $bytes;
+		if ( function_exists( 'size_format' ) ) {
+			$formatted = size_format( $bytes, 2 );
+			if ( false !== $formatted && '' !== $formatted ) {
+				return $formatted;
+			}
+		}
+		// Fallback for unit tests / CLI contexts where WP isn't loaded.
+		$units  = array( 'B', 'KB', 'MB', 'GB', 'TB', 'PB' );
+		$factor = 0;
+		$value  = (float) $bytes;
+		while ( $value >= 1024 && $factor < count( $units ) - 1 ) {
+			$value /= 1024;
+			$factor++;
+		}
+		return sprintf( '%.2f %s', $value, $units[ $factor ] );
 	}
 
 	/**
@@ -233,13 +263,43 @@ class WP2PcloudFuncs {
 	}
 
 	/**
-	 * Get memory limit.
+	 * Get the PHP memory limit in megabytes.
 	 *
-	 * @return int
+	 * Previous revisions did `str_replace(['M','K','G'], '', $limit)` which mixed units: a
+	 * `1G` limit returned `1` (one, compared against a 64 MB threshold), a `65536K` limit
+	 * returned `65536`. Callers then treated the value as megabytes. This function now
+	 * returns a true megabyte count regardless of the underlying unit suffix.
+	 *
+	 * A return value of `-1` indicates an unlimited `memory_limit` (ini `-1`).
+	 *
+	 * @return int Megabytes, or -1 for unlimited.
 	 */
 	public static function get_memory_limit(): int {
 
 		$current_limit = ini_get( 'memory_limit' );
-		return intval( str_replace( array( 'M', 'K', 'G' ), '', $current_limit ) );
+		if ( ! is_string( $current_limit ) || '' === $current_limit ) {
+			return 128; // Conservative default if ini_get misbehaves.
+		}
+
+		if ( '-1' === trim( $current_limit ) ) {
+			return -1;
+		}
+
+		if ( function_exists( 'wp_convert_hr_to_bytes' ) ) {
+			$bytes = wp_convert_hr_to_bytes( $current_limit );
+		} else {
+			// Fallback for environments where WP helpers aren't loaded yet.
+			$value = trim( $current_limit );
+			$unit  = strtolower( substr( $value, -1 ) );
+			$num   = (int) $value;
+			$bytes = match ( $unit ) {
+				'g'     => $num * 1024 * 1024 * 1024,
+				'm'     => $num * 1024 * 1024,
+				'k'     => $num * 1024,
+				default => $num,
+			};
+		}
+
+		return (int) round( $bytes / 1024 / 1024 );
 	}
 }

@@ -49,7 +49,7 @@ if ( empty( $wp2pcl_withmysql ) || intval( $wp2pcl_withmysql ) < 1 ) {
 	$wp2pcl_withmysql_chk = '';
 }
 
-$next_sch = wp_next_scheduled( 'wp2pcl_run_pcloud_backup_hook' );
+$next_sch = wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() );
 
 $pl_dir_arr = explode( '/', plugin_dir_path( dirname( __FILE__ ) ) );
 
@@ -73,7 +73,8 @@ if ( ! isset( $plugin_path ) ) {
 	$plugin_path = plugins_url( '/', __FILE__ );
 }
 
-$next_backup = gmdate( 'r', wp_next_scheduled( 'wp2pcl_run_pcloud_backup_hook' ) );
+$next_backup_ts = wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() );
+$next_backup    = $next_backup_ts ? gmdate( 'r', $next_backup_ts ) : '';
 $lang        = get_bloginfo( 'language' );
 $nonce       = wp_create_nonce();
 $msg         = '';

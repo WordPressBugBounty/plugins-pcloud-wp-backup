@@ -2,9 +2,9 @@
 Contributors: ploudapp, the_root
 Tags: backup, pCloud
 Requires at least: 5.0
-Tested up to: 6.6.2
+Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 2.0.1
+Stable tag: 2.0.2
 License: GPLv3 or later
 
 The pCloud WP Backup plugin will help you backup everything on your blog with one click and store it in the cloud in the most secure way.
@@ -57,6 +57,26 @@ If the manual backup mode works it means that the plugin is functioning correctl
 1. Here is a screenshot of the plugin in action
 
 == Changelog ==
+
+= 2.0.2 =
+* Security: removed an unsafe TLS verification bypass on upload; the plugin no longer exposes the OAuth access token to page JavaScript or to the debug error log.
+* Reliability: fixed a chunk byte-accounting bug that could leave uploads or downloads short or duplicated when a network hiccup split a chunk.
+* Reliability: the database restore now streams the SQL file and parses statements with quote-aware splitting, which fixes restoring content containing semicolon+newline sequences and stops the large-site OOM during restore.
+* Performance: archive extraction on restore is now a single-pass operation. Large archives restore dramatically faster.
+* Performance: operational options (logs, operation state, async queue, notifications) are no longer autoloaded on every WordPress request.
+* Fix: deactivating the plugin no longer wipes your OAuth token and schedule. Only full uninstall removes configuration.
+* Fix: the "Next scheduled backup" display now shows the correct time.
+* Fix: a transient lock prevents concurrent admin-page polls from racing and doubling up chunk uploads.
+* Fix: failed chunk uploads and downloads now surface clear errors instead of hanging forever.
+* Fix: database dump no longer falls back to writing `backup.sql` into the web-accessible WordPress root on hosts without a usable tmp dir; it now fails closed.
+* Fix: transients are always cleared after a database restore, not only when user sessions were preserved.
+* Added: unobtrusive rating prompt after two successful backups — a centered modal on the plugin page with two-touch flow (dismissible, only asked once).
+* Fix: automatic backups now show progress in the admin UI — previously the progress bar was deliberately hidden for scheduled backups, making them appear frozen.
+* Fix: when the admin page is open during an automatic backup, chunks upload at the same speed as manual backups instead of only advancing once per 2-minute cron tick.
+* Fix: in-progress automatic backups are no longer silently aborted when the cron's schedule gate rejects (e.g. hour window closing mid-upload).
+* Fix: added a version-gated upgrade routine so cron events and new options are correctly registered on plugin update (WordPress does not fire the activation hook on updates).
+* Fix: the plugin now self-heals if its scheduled cron event has been cleared between version bumps (deactivate/reactivate of another plugin, cron-management tools, etc.) — the next admin pageview re-registers it instead of silently never running again.
+* Tested against WordPress 6.9 (including 6.9.4).
 
 = 2.0.1 =
 * Hotfix for cURL http headers issue.
