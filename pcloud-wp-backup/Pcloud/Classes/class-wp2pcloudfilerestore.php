@@ -35,6 +35,9 @@ class WP2PcloudFileRestore {
 			mkdir( $this->restore_path );
 		}
 
+		// Deny web access to the archives downloaded here for restore (see CVE-2026-14503).
+		wp2pcloudfuncs::harden_dir( $this->restore_path );
+
 		if ( ! is_dir( $this->restore_path ) ) {
 			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='err_temp_folder_fail2mk'>ERROR: Temporary folder can not be created!</span> [" . $this->restore_path . ']' );
 			wp2pclouddebugger::log( 'Failed to create Temporary folder!' );

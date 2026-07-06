@@ -43,6 +43,44 @@ class WP2PcloudFuncs {
 	}
 
 	/**
+	 * Drop hardening files into a working directory that temporarily holds backup
+	 * archives, so those archives cannot be directory-listed or downloaded over HTTP.
+	 *
+	 * Apache honours the .htaccess deny rule, IIS honours web.config, and index.php
+	 * blocks directory listing on every server. These files only affect the web
+	 * server — the plugin itself reads/writes the archives via direct filesystem
+	 * calls, which are unaffected.
+	 *
+	 * NOTE: nginx ignores .htaccess. For complete cross-server coverage the working
+	 * directory should also live outside the web root; that relocation is tracked
+	 * separately. This hardening is the in-place mitigation.
+	 *
+	 * @param string $dir Absolute path to the directory to harden.
+	 * @return void
+	 */
+	public static function harden_dir( string $dir ): void {
+
+		$dir = rtrim( (string) $dir, '/' );
+
+		if ( '' === $dir || ! is_dir( $dir ) ) {
+			return;
+		}
+
+		$guard_files = array(
+			'index.php'  => "<?php\n// Silence is golden.\n",
+			'.htaccess'  => "# pCloud WP Backup - deny direct web access to backup archives.\n<IfModule mod_authz_core.c>\n\tRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n\tOrder allow,deny\n\tDeny from all\n</IfModule>\n",
+			'web.config' => "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\t<system.webServer>\n\t\t<authorization>\n\t\t\t<deny users=\"*\" />\n\t\t</authorization>\n\t</system.webServer>\n</configuration>\n",
+		);
+
+		foreach ( $guard_files as $name => $contents ) {
+			$path = $dir . '/' . $name;
+			if ( ! file_exists( $path ) ) {
+				@file_put_contents( $path, $contents ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+			}
+		}
+	}
+
+	/**
 	 * Provides tha pCloud API endpoint hostname depending on the selected by user datacenter.
 	 *
 	 * @return string

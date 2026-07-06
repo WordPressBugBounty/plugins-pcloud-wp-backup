@@ -9,7 +9,7 @@
  * Plugin URI: https://www.pcloud.com
  * Summary: pCloud WP Backup plugin
  * Description: pCloud WP Backup has been created to make instant backups of your blog and its data, regularly.
- * Version: 2.0.2
+ * Version: 2.0.4
  * Requires PHP: 8.0
  * Author: pCloud
  * URI: https://www.pcloud.com
@@ -214,7 +214,32 @@ function wp2pcl_ajax_process_request_inner(): void {
 		$dbg_mode = true;
 	}
 
+	// Authorization gate for every AJAX method below. The wp_ajax_pcloudbackup hook only
+	// guarantees the requester is logged in; is_admin() in admin-ajax context is NOT a
+	// capability check. Without this, a subscriber-level user could reach state-changing
+	// branches such as start_backup and unlink_acc (CVE-2026-14503). The plugin is
+	// administrator-only (see the admin menu capability), so require that here too.
+	if ( ! current_user_can( 'administrator' ) ) {
+		$result['status']   = 15;
+		$result['msg']      = '<p>You do not have permission to perform this action.</p>';
+		$result['sitename'] = $sitename;
+
+		echo wp_json_encode( $result );
+
+		return;
+	}
+
 	if ( 'unlink_acc' === $m ) {
+
+		if ( ! isset( $_POST['wp2pcl_nonce'] ) || ! wp_verify_nonce( sanitize_key( $_POST['wp2pcl_nonce'] ) ) ) {
+			$result['status']   = 15;
+			$result['msg']      = '<p>Failed to validate the request!</p>';
+			$result['sitename'] = $sitename;
+
+			echo wp_json_encode( $result );
+
+			return;
+		}
 
 		wp2pcloudfuncs::set_storred_val( PCLOUD_AUTH_KEY, '' );
 		wp2pcloudfuncs::set_storred_val( PCLOUD_AUTH_MAIL, '' );
@@ -570,6 +595,16 @@ function wp2pcl_ajax_process_request_inner(): void {
 			$result['status'] = 0;
 		}
 	} elseif ( 'start_backup' === $m ) {
+
+		if ( ! isset( $_POST['wp2pcl_nonce'] ) || ! wp_verify_nonce( sanitize_key( $_POST['wp2pcl_nonce'] ) ) ) {
+			$result['status']   = 15;
+			$result['msg']      = '<p>Failed to validate the request!</p>';
+			$result['sitename'] = $sitename;
+
+			echo wp_json_encode( $result );
+
+			return;
+		}
 
 		wp2pcloudfuncs::set_storred_val( PCLOUD_LAST_BACKUPDT, time() );
 		wp2pcloudfuncs::set_storred_val( PCLOUD_HAS_ACTIVITY, '1' );
@@ -1565,7 +1600,7 @@ if ( ! function_exists( 'pcloud_plugin_php_memory_limit_error' ) ) {
 function wp2pcl_maybe_upgrade(): void {
 
 	$version_key     = 'wp2pcl_plugin_version';
-	$current_version = '2.0.2';
+	$current_version = '2.0.4';
 	$stored_version  = get_option( $version_key, '' );
 
 	if ( $stored_version === $current_version ) {
@@ -1582,6 +1617,12 @@ function wp2pcl_maybe_upgrade(): void {
 
 	// --- Seed options introduced in 2.0.2 ---
 	WP2PcloudRatingPrompt::on_activate();
+
+	// --- 2.0.4 security: harden the working directories on sites that already have
+	//     them from a pre-patch version, so any leftover archive stops being
+	//     web-downloadable immediately on upgrade (CVE-2026-14503). ---
+	wp2pcloudfuncs::harden_dir( plugin_dir_path( __FILE__ ) . 'tmp' );
+	wp2pcloudfuncs::harden_dir( PCLOUD_TEMP_DIR );
 
 	// --- Mark as upgraded ---
 	update_option( $version_key, $current_version, true );

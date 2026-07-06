@@ -128,6 +128,9 @@ class WP2PcloudFileBackup {
 
 		$this->clear_all_tmp_files();
 
+		// Deny web access to the archives we are about to write here (see CVE-2026-14503).
+		wp2pcloudfuncs::harden_dir( $local_backup_path_name );
+
 		wp2pclouddebugger::log( 'All temporary files - cleared!' );
 
 		$rootdir = rtrim( ABSPATH, '/' );
