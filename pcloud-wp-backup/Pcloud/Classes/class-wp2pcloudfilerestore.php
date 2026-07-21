@@ -214,7 +214,10 @@ class WP2PcloudFileRestore {
 
 		try {
 
-			$dns = 'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=' . DB_CHARSET;
+			// v2.0.6: build the DSN via the shared helper so a DB_HOST with a port or
+			// socket (e.g. "localhost:3306") no longer fails with "Unknown MySQL server
+			// host" — the same fix applied to the DB *backup* path in v2.0.5.
+			$dns = WP2PcloudDBBackup::build_pdo_dsn( DB_HOST, DB_NAME ) . ';charset=' . DB_CHARSET;
 			$db  = new PDO( // phpcs:ignore
 				$dns,
 				DB_USER,

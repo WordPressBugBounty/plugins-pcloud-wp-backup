@@ -9,7 +9,7 @@
  * Plugin URI: https://www.pcloud.com
  * Summary: pCloud WP Backup plugin
  * Description: pCloud WP Backup has been created to make instant backups of your blog and its data, regularly.
- * Version: 2.0.5
+ * Version: 2.0.6
  * Requires PHP: 8.0
  * Author: pCloud
  * URI: https://www.pcloud.com
@@ -1304,19 +1304,34 @@ function wp2pcloud_display_settings(): void {
 		$locationid = intval( sanitize_key( wp_unslash( $_GET['locationid'] ) ) ); // phpcs:ignore
 	}
 
+	$oauth_nonce = '';
+	if ( isset( $_GET['wp2pcl_oauth'] ) ) { // phpcs:ignore
+		$oauth_nonce = sanitize_key( wp_unslash( $_GET['wp2pcl_oauth'] ) ); // phpcs:ignore
+	}
+
 	if ( ( 'pcloud_auth' === $do ) && ! empty( $auth_key ) ) {
 
-		if ( $locationid > 0 && $locationid < 100 ) {
-			wp2pcloudfuncs::set_storred_val( PCLOUD_API_LOCATIONID, $locationid );
-			$result['status'] = 0;
+		// CSRF protection (CVE-2026-57757). The pCloud token returns via a GET redirect,
+		// so it cannot carry a request nonce directly — we carry one through the OAuth
+		// `state` parameter (set in views/wp2pcl-config.php) and verify it before storing.
+		if ( ! wp_verify_nonce( $oauth_nonce, 'wp2pcl_oauth' ) ) {
+
+			wp2pclouddebugger::log( 'OAuth callback rejected: state could not be verified.' );
+			print '<h2 style="color: red;text-align: center" class="wp2pcloud-login-failed">Login could not be verified. Please start the pCloud connection again from this page.</h2>';
+
+		} else {
+
+			if ( $locationid > 0 && $locationid < 100 ) {
+				wp2pcloudfuncs::set_storred_val( PCLOUD_API_LOCATIONID, $locationid );
+				$result['status'] = 0;
+			}
+
+			wp2pcloudfuncs::set_storred_val( PCLOUD_AUTH_KEY, $auth_key );
+
+			pcl_verify_directory_structure();
+
+			print '<h2 style="color: green;text-align: center" class="wp2pcloud-login-succcess">You are successfully logged in!</h2>';
 		}
-
-		wp2pcloudfuncs::set_storred_val( PCLOUD_AUTH_KEY, $auth_key );
-
-		pcl_verify_directory_structure();
-
-		print '<h2 style="color: green;text-align: center" class="wp2pcloud-login-succcess">You are successfully logged in!</h2>';
-
 	}
 
 	$static_files_ver = '2.0.0.1';
@@ -1612,7 +1627,7 @@ if ( ! function_exists( 'pcloud_plugin_php_memory_limit_error' ) ) {
 function wp2pcl_maybe_upgrade(): void {
 
 	$version_key     = 'wp2pcl_plugin_version';
-	$current_version = '2.0.5';
+	$current_version = '2.0.6';
 	$stored_version  = get_option( $version_key, '' );
 
 	if ( $stored_version === $current_version ) {

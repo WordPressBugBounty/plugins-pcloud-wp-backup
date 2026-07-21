@@ -4,7 +4,7 @@ Tags: backup, pCloud
 Requires at least: 5.0
 Tested up to: 7.0.2
 Requires PHP: 8.0
-Stable tag: 2.0.5
+Stable tag: 2.0.6
 License: GPLv3 or later
 
 The pCloud WP Backup plugin will help you backup everything on your blog with one click and store it in the cloud in the most secure way.
@@ -57,6 +57,10 @@ If the manual backup mode works it means that the plugin is functioning correctl
 1. Here is a screenshot of the plugin in action
 
 == Changelog ==
+
+= 2.0.6 =
+* Security: hardened the pCloud account-connection flow against Cross-Site Request Forgery (CSRF). Fixes CVE-2026-57757. Updating is recommended.
+* Fix: database restore now connects correctly on hosts whose `DB_HOST` includes a port or socket (e.g. `localhost:3306`).
 
 = 2.0.5 =
 * Fix: the database backup now connects correctly on hosts whose `DB_HOST` includes a port or socket (for example `localhost:3306`). Previously such hosts failed with "Unknown MySQL server host" and the backup silently continued without the database.
@@ -139,6 +143,10 @@ If the manual backup mode works it means that the plugin is functioning correctl
 
 
 == Upgrade Notice ==
+
+= 2.0.6 =
+Security release (CSRF, CVE-2026-57757) plus a database-restore connection fix. Update recommended.
+
 Plugin is more stable now and expected to work faster for bigger archives.
 
 3raydlnawdqicu8ixwjrjgpr0fqgpae4

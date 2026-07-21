@@ -87,11 +87,20 @@ $auth_url = '#';
 
 if ( empty( $auth ) ) {
 
+	// CSRF protection (CVE-2026-57757): carry a nonce through the OAuth `state`
+	// parameter. pCloud round-trips `state` back (returnqueryparams=1), so the callback
+	// in wp2pcloud_display_settings() can verify the login was started from this page.
+	$oauth_state = add_query_arg(
+		'wp2pcl_oauth',
+		wp_create_nonce( 'wp2pcl_oauth' ),
+		admin_url( 'options-general.php?page=wp2pcloud_settings' )
+	);
+
 	$auth_url  = 'https://my.pcloud.com/oauth2/authorize?client_id=' . esc_html( PCLOUD_OAUTH_CLIENT_ID );
 	$auth_url .= '&amp;response_type=token';
 	$auth_url .= '&amp;force_reapprove=true';
 	$auth_url .= '&amp;returnqueryparams=1';
-	$auth_url .= '&amp;state=' . rawurlencode( admin_url( 'options-general.php?page=wp2pcloud_settings' ) );
+	$auth_url .= '&amp;state=' . rawurlencode( $oauth_state );
 	$auth_url .= '&amp;redirect_uri=' . rawurlencode( 'https://wpoauth2.pcloud.com/' );
 }
 

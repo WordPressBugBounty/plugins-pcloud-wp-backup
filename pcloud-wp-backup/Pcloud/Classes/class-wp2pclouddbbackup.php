@@ -134,11 +134,14 @@ class WP2PcloudDBBackup {
 	 * literal hostname and fail with "Unknown MySQL server host". This mirrors
 	 * wpdb::parse_db_host() so the dumper connects wherever WordPress itself can.
 	 *
+	 * Public since v2.0.6 so the restore path (WP2PcloudFileRestore::restore_db)
+	 * can build its own DSN the same way instead of concatenating DB_HOST raw.
+	 *
 	 * @param string $db_host Raw DB_HOST constant value.
 	 * @param string $db_name Database name.
-	 * @return string PDO DSN string.
+	 * @return string PDO DSN string (`mysql:host=...;port=...;dbname=...` or unix_socket).
 	 */
-	private static function build_pdo_dsn( string $db_host, string $db_name ): string {
+	public static function build_pdo_dsn( string $db_host, string $db_name ): string {
 
 		$host   = $db_host;
 		$port   = '';
