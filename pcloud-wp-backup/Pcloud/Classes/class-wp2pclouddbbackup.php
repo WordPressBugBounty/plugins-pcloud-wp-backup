@@ -88,7 +88,7 @@ class WP2PcloudDBBackup {
 			'no-autocommit'      => false,
 		);
 
-		$dump = new PclMysqlDump( 'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME, DB_USER, DB_PASSWORD, $dump_settings );
+		$dump = new PclMysqlDump( self::build_pdo_dsn( DB_HOST, DB_NAME ), DB_USER, DB_PASSWORD, $dump_settings );
 
 		try {
 
@@ -102,9 +102,79 @@ class WP2PcloudDBBackup {
 			$msg = $e->getMessage();
 
 			wp2pclouddebugger::log( 'db_backup->start() - Failed:' . $msg );
-			wp2pcloudlogger::info( '<span>Plugin error: ' . $msg . '</span>' );
+			wp2pcloudlogger::info( '<span style="color: red">Plugin error: ' . esc_html( $msg ) . '</span>' );
+
+			// The dump never completed, so $this->save_file is empty (only the
+			// ZIP header's worth of bytes once compressed). Returning that path
+			// would let the caller ship a backup that silently omits the whole
+			// database. Clean up and report failure instead.
+			if ( is_file( $this->save_file ) ) {
+				@unlink( $this->save_file ); // phpcs:ignore
+			}
+
+			wp2pcloudlogger::notification(
+				"<span class='pcl_transl' data-i10nk='db_backup_failed_notice'>The database was NOT included in this backup because the connection to MySQL failed.</span> "
+				. '<span>' . esc_html( $msg ) . '</span>'
+			);
+
+			return false;
 		}
 
 		return $this->save_file;
+	}
+
+	/**
+	 * Build a PDO DSN from a WordPress DB_HOST value.
+	 *
+	 * WordPress (via mysqli/wpdb) accepts several DB_HOST forms that a PDO DSN
+	 * does not understand as-is: "host:port", "host:/path/to/socket",
+	 * ":/path/to/socket", and bracketed IPv6 such as "[::1]:3306". In a PDO DSN
+	 * the host, port and unix_socket must be separate keys, so a raw
+	 * "mysql:host=localhost:3306;..." makes PDO treat "localhost:3306" as a
+	 * literal hostname and fail with "Unknown MySQL server host". This mirrors
+	 * wpdb::parse_db_host() so the dumper connects wherever WordPress itself can.
+	 *
+	 * @param string $db_host Raw DB_HOST constant value.
+	 * @param string $db_name Database name.
+	 * @return string PDO DSN string.
+	 */
+	private static function build_pdo_dsn( string $db_host, string $db_name ): string {
+
+		$host   = $db_host;
+		$port   = '';
+		$socket = '';
+
+		// Peel off a unix socket path (":/path/to/socket") from the right.
+		$socket_pos = strpos( $host, ':/' );
+		if ( false !== $socket_pos ) {
+			$socket = substr( $host, $socket_pos + 1 );
+			$host   = substr( $host, 0, $socket_pos );
+		}
+
+		if ( substr_count( $host, ':' ) > 1 ) {
+			// IPv6 address, optionally "[::1]:port".
+			$pattern = '#^(?:\[)?(?P<host>[0-9a-fA-F:]+)(?:\]:(?P<port>\d+))?#';
+		} else {
+			// IPv4 address / hostname, optionally "host:port".
+			$pattern = '#^(?P<host>[^:/]*)(?::(?P<port>\d+))?#';
+		}
+
+		$matches = array();
+		if ( 1 === preg_match( $pattern, $host, $matches ) ) {
+			$host = $matches['host'] ?? '';
+			$port = ( isset( $matches['port'] ) && '' !== $matches['port'] ) ? $matches['port'] : '';
+		}
+
+		$dsn = 'mysql:';
+		if ( '' !== $socket ) {
+			$dsn .= 'unix_socket=' . $socket . ';';
+		} else {
+			$dsn .= 'host=' . $host . ';';
+			if ( '' !== $port ) {
+				$dsn .= 'port=' . $port . ';';
+			}
+		}
+
+		return $dsn . 'dbname=' . $db_name;
 	}
 }

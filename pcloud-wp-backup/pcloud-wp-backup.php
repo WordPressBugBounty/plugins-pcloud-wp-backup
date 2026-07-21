@@ -9,7 +9,7 @@
  * Plugin URI: https://www.pcloud.com
  * Summary: pCloud WP Backup plugin
  * Description: pCloud WP Backup has been created to make instant backups of your blog and its data, regularly.
- * Version: 2.0.4
+ * Version: 2.0.5
  * Requires PHP: 8.0
  * Author: pCloud
  * URI: https://www.pcloud.com
@@ -1121,9 +1121,21 @@ function wp2pcl_perform_auto_backup(): void {
 
 		$wp2pcl_withmysql = wp2pcloudfuncs::get_storred_val( PCLOUD_SCHDATA_INCLUDE_MYSQL );
 		if ( ! empty( $wp2pcl_withmysql ) && 1 === intval( $wp2pcl_withmysql ) ) {
-			$b    = new wp2pclouddbbackup();
-			$file = $b->start();
-			$f->set_mysql_backup_filename( $file );
+			try {
+				$b    = new wp2pclouddbbackup();
+				$file = $b->start();
+				if ( ! is_bool( $file ) ) {
+					$f->set_mysql_backup_filename( $file );
+					wp2pclouddebugger::log( 'Database backup - ready!' );
+				} else {
+					wp2pclouddebugger::log( 'Database backup - failed!' );
+					wp2pcloudlogger::info( "<span style='color: red' class='pcl_transl' data-i10nk='failed_to_backup_db'>Database backup - failed!</span>" );
+				}
+			} catch ( Exception $db_ex ) {
+				wp2pclouddebugger::log( 'Database backup constructor failed: ' . $db_ex->getMessage() );
+				wp2pcloudlogger::info( "<span style='color: red' class='pcl_transl' data-i10nk='failed_to_backup_db'>Database backup - failed!</span> " . esc_html( $db_ex->getMessage() ) );
+				// File backup will proceed without a DB snapshot.
+			}
 		}
 
 		$f->start( 'auto' );
@@ -1600,7 +1612,7 @@ if ( ! function_exists( 'pcloud_plugin_php_memory_limit_error' ) ) {
 function wp2pcl_maybe_upgrade(): void {
 
 	$version_key     = 'wp2pcl_plugin_version';
-	$current_version = '2.0.4';
+	$current_version = '2.0.5';
 	$stored_version  = get_option( $version_key, '' );
 
 	if ( $stored_version === $current_version ) {
