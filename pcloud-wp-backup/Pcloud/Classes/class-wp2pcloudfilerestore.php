@@ -2,7 +2,7 @@
 /**
  * WP2PcloudFileRestore class
  *
- * @file class-wp2pcloudfilerestore.php
+ * @file class-wp2pcloudilerestoe.php
  * @package pcloud_wp_backup
  */
 
@@ -26,6 +26,7 @@ class WP2PcloudFileRestore {
 
 	/**
 	 * Class constructor
+	 * @throws WP2PcloudRestoreException
 	 */
 	public function __construct() {
 
@@ -60,13 +61,13 @@ class WP2PcloudFileRestore {
 	 */
 	public function download_chunk_curl( string $url, int $offset = 0, string $archive_file = 'tmp.zip' ): int {
 
-		$chunksize = 2 * ( 1000 * 1000 ); // 2 MB
+		$chunk_size = 2 * ( 1000 * 1000 ); // 2 MB
 
-		$errstr = '';
+		$err_str = '';
 
 		$args = array(
 			'headers' => array(
-				'Range' => 'bytes=' . $offset . '-' . ( $offset + ( $chunksize - 1 ) ),
+				'Range' => 'bytes=' . $offset . '-' . ( $offset + ( $chunk_size - 1 ) ),
 			),
 		);
 
@@ -78,12 +79,12 @@ class WP2PcloudFileRestore {
 				$content = $response_raw;
 			}
 		} elseif ( is_wp_error( $api_response ) ) {
-			$errstr = $api_response->get_error_message();
+			$err_str = $api_response->get_error_message();
 		}
 
 		if ( ! is_string( $content ) || '' === $content ) {
-			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='err_failed2open_conn'>Failed to open connection to the backup file:</span> [url: $url] " . $errstr );
-			wp2pclouddebugger::log( 'download_chunk_curl() - Failed to open connection to the backup file: [ url: ' . $url . ', err: ' . $errstr . ' ]' );
+			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='err_failed2open_conn'>Failed to open connection to the backup file:</span> [url: $url] " . $err_str );
+			wp2pclouddebugger::log( 'download_chunk_curl() - Failed to open connection to the backup file: [ url: ' . $url . ', err: ' . $err_str . ' ]' );
 			return $offset; // No progress; caller treats this as a failure.
 		}
 
@@ -365,7 +366,7 @@ class WP2PcloudFileRestore {
 	}
 
 	/**
-	 * Remove files in directory
+	 * Remove files in the directory
 	 *
 	 * @param string $archive_file Archive file to be removed.
 	 * @return void

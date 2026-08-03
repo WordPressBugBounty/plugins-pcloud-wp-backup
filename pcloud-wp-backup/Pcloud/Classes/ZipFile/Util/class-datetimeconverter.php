@@ -48,7 +48,7 @@ class DateTimeConverter {
 	 */
 	public static function unix_to_ms_dos( int $unix_timestamp ): int {
 		if ( 0 > $unix_timestamp ) {
-			throw new Exception( 'Negative unix timestamp: ' . $unix_timestamp );
+			throw new Exception( 'Negative UNIX timestamp: ' . $unix_timestamp );
 		}
 
 		$date     = getdate( $unix_timestamp );

@@ -22,7 +22,7 @@ class WP2PcloudLogger {
 	 */
 	public static function generate_new( ?string $initial_message = '' ): void {
 
-		wp2pcloudfuncs::set_storred_val( PCLOUD_LOG, $initial_message );
+		wp2pcloudfuncs::set_stored_val( PCLOUD_LOG, $initial_message );
 
 	}
 
@@ -34,7 +34,7 @@ class WP2PcloudLogger {
 	 * @return string
 	 */
 	public static function read_last_log( ?bool $as_json = true ): string {
-		$log = wp2pcloudfuncs::get_storred_val( PCLOUD_LOG );
+		$log = wp2pcloudfuncs::get_stored_val( PCLOUD_LOG );
 
 		if ( $as_json ) {
 			return wp_json_encode( array( 'log' => $log ) );
@@ -65,7 +65,7 @@ class WP2PcloudLogger {
 			return;
 		}
 
-		$current_data  = (string) wp2pcloudfuncs::get_storred_val( PCLOUD_LOG );
+		$current_data  = (string) wp2pcloudfuncs::get_stored_val( PCLOUD_LOG );
 		$current_data .= '<br/>' . gmdate( 'Y-m-d H:i:s' ) . ' - ' . $new_data;
 
 		// Cap user log at ~20 KB; trim to the last 15 KB when exceeded. Previously the log
@@ -76,7 +76,7 @@ class WP2PcloudLogger {
 			$current_data = substr( $current_data, -15000 );
 		}
 
-		wp2pcloudfuncs::set_storred_val( PCLOUD_LOG, $current_data );
+		wp2pcloudfuncs::set_stored_val( PCLOUD_LOG, $current_data );
 	}
 
 	/**
@@ -101,7 +101,7 @@ class WP2PcloudLogger {
 			return;
 		}
 
-		$current_data = wp2pcloudfuncs::get_storred_val( PCLOUD_NOTIFICATIONS );
+		$current_data = wp2pcloudfuncs::get_stored_val( PCLOUD_NOTIFICATIONS );
 		if ( empty( $current_data ) ) {
 			$current_data = '[]';
 		}
@@ -122,7 +122,7 @@ class WP2PcloudLogger {
 
 		$store_back_the_data = wp_json_encode( $current_data_arr );
 
-		wp2pcloudfuncs::set_storred_val( PCLOUD_NOTIFICATIONS, $store_back_the_data );
+		wp2pcloudfuncs::set_stored_val( PCLOUD_NOTIFICATIONS, $store_back_the_data );
 	}
 
 	/**
@@ -131,6 +131,6 @@ class WP2PcloudLogger {
 	 * @return void
 	 */
 	public static function clear_log(): void {
-		wp2pcloudfuncs::set_storred_val( PCLOUD_LOG, '' );
+		wp2pcloudfuncs::set_stored_val( PCLOUD_LOG, '' );
 	}
 }

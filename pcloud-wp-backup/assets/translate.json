@@ -42,6 +42,8 @@
             "failed_to_get_bk_filesz": "ERROR: failed to get the size of backup file",
             "err_arch_file_nf": "ERROR: Archive file not found!",
             "too_many_failures": "ERROR: Too many failures, try to disable\/enable the plugin !",
+            "zip_progress": "Compressing files",
+            "backup_stalled": "Backup stopped: the server ended the process while archives were being created. Please try again — if it repeats, the site may be too large for this server's limits.",
             "upload_completed": "Upload completed!",
             "start_db_backup": "Starting Database Backup",
             "db_backup_finished": "Database Backup Finished",

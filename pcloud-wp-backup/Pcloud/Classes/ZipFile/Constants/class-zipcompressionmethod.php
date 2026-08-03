@@ -74,7 +74,7 @@ final class ZipCompressionMethod {
 	);
 
 	/**
-	 * Get compression method name.
+	 * Get a compression method name.
 	 *
 	 * @param int $value Value to check.
 	 * @return string

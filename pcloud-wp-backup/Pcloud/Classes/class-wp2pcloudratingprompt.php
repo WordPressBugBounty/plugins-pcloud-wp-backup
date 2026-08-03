@@ -46,10 +46,10 @@ class WP2PcloudRatingPrompt {
 	}
 
 	/**
-	 * Ensure the "installed at" timestamp exists. For fresh installs this is set
-	 * by on_activate(). For existing installs upgrading from a version without
+	 * Ensure the "installed at" timestamp exists. For fresh installations this is set
+	 * by on_activate(). For existing installations upgrading from a version without
 	 * the rating prompt, we use the earliest known backup timestamp
-	 * (PCLOUD_LAST_BACKUPDT) as a proxy — the user has clearly been active
+	 * (PCLOUD_LAST_BACKUPDT) as a proxy — the user has been active
 	 * since then. Falls back to time() only if no prior backup exists.
 	 */
 	private static function ensure_installed_at(): void {

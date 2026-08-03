@@ -61,7 +61,7 @@ class WP2PcloudFileBackup {
 	private ?string $base_dir;
 
 	/**
-	 * Class contructor
+	 * Class constructor
 	 *
 	 * @param string|null $base_dir Base directory.
 	 */
@@ -69,7 +69,7 @@ class WP2PcloudFileBackup {
 
 		$this->sql_backup_file = '';
 		$this->base_dir        = $base_dir;
-		$this->authkey         = wp2pcloudfuncs::get_storred_val( PCLOUD_AUTH_KEY );
+		$this->authkey         = wp2pcloudfuncs::get_stored_val( PCLOUD_AUTH_KEY );
 		$this->apiep           = 'https://' . wp2pcloudfuncs::get_api_ep_hostname();
 		$this->part_size       = 3 * 1000 * 1000;
 
@@ -96,7 +96,7 @@ class WP2PcloudFileBackup {
 	}
 
 	/**
-	 * Start backup process
+	 * Start the backup process
 	 *
 	 * @param string|null $mode Backup process mode.
 	 *
@@ -105,7 +105,7 @@ class WP2PcloudFileBackup {
 	 */
 	public function start( ?string $mode = 'manual' ): void {
 
-		wp2pcloudfuncs::set_storred_val( PCLOUD_BACKUP_FILE_INDEX, '' );
+		wp2pcloudfuncs::set_stored_val( PCLOUD_BACKUP_FILE_INDEX, '' );
 		wp2pcloudfuncs::set_execution_limits();
 
 		$local_backup_path_name = $this->base_dir . '/tmp';
@@ -123,6 +123,12 @@ class WP2PcloudFileBackup {
 			'failures'   => 0,
 			'folder_id'  => 0,
 			'offset'     => 0,
+			// Watchdog timestamps (2.0.7). 'preparing' is the one state nothing could
+			// recover from: the browser poll refuses to advance it and the cron's
+			// in-progress override only covers auto mode, so a worker that died here
+			// left the plugin stuck until the failure counter aged out days later.
+			'preparing_since' => time(),
+			'zip_heartbeat'   => time(),
 		);
 		wp2pcloudfuncs::set_operation( $op_data );
 
@@ -133,13 +139,24 @@ class WP2PcloudFileBackup {
 
 		wp2pclouddebugger::log( 'All temporary files - cleared!' );
 
-		$rootdir = rtrim( ABSPATH, '/' );
+		// Environment snapshot: everything that decides whether this backup survives,
+		// recorded once so a support ticket arrives with the host already described.
+		foreach ( wp2pcloudfuncs::environment_snapshot( $local_backup_path_name ) as $key => $value ) {
+			wp2pclouddebugger::log( 'env | ' . $key . ': ' . $value );
+		}
+
+		$root_dir = rtrim( ABSPATH, '/' );
 
 		wp2pclouddebugger::log( 'Creating a list of files to be compressed!' );
 
-		$files = self::find_all_files( $rootdir );
+		$scan_started = time();
 
-		wp2pclouddebugger::log( 'The List of all files is ready and will be sent for compression!' );
+		$files = self::find_all_files( $root_dir );
+
+		wp2pclouddebugger::log(
+			'The List of all files is ready and will be sent for compression! [ '
+			. count( $files ) . ' files found in ' . ( time() - $scan_started ) . 's ]'
+		);
 
 		$sql_backup_file_name      = '';
 		$php_extensions            = get_loaded_extensions();
@@ -150,7 +167,7 @@ class WP2PcloudFileBackup {
 			wp2pclouddebugger::log( 'Start creating ZIP archives!' );
 
 			/**
-			 * STEP 1 -> we will archivate the database.
+			 * STEP 1 -> we will archive the database.
 			 */
 			if ( ! empty( $this->sql_backup_file ) ) {
 				if ( file_exists( $this->sql_backup_file ) && is_readable( $this->sql_backup_file ) ) {
@@ -218,7 +235,7 @@ class WP2PcloudFileBackup {
 
 				wp2pclouddebugger::log( 'Closing ZIP archive with attempt: ' . ( $try + 1 ) . ' failed, retrying!' );
 
-				$files = self::find_all_files( $rootdir );
+				$files = self::find_all_files( $root_dir );
 			}
 
 			if ( 0 === count( $archive_files ) ) {
@@ -310,12 +327,26 @@ class WP2PcloudFileBackup {
 	 * @return void
 	 */
 	public function clear_all_tmp_files(): void {
-		$files = glob( $this->base_dir . '/tmp/*' );
-		foreach ( $files as $file ) {
-			if ( is_file( $file ) && is_writable( $file ) ) {
-				unlink( $file );
+
+		$dir   = $this->base_dir . '/tmp';
+		$files = glob( $dir . '/*' );
+
+		if ( is_array( $files ) ) {
+			foreach ( $files as $file ) {
+				// Never remove the web-access guard files; glob() matches them.
+				// See WP2PcloudFuncs::guard_files().
+				if ( wp2pcloudfuncs::is_guard_file( basename( $file ) ) ) {
+					continue;
+				}
+				if ( is_file( $file ) && is_writable( $file ) ) {
+					unlink( $file );
+				}
 			}
 		}
+
+		// Re-assert the directory hardening on every cleanup, so the invariant holds
+		// regardless of how this directory was reached.
+		wp2pcloudfuncs::harden_dir( $dir );
 	}
 
 	/**
@@ -358,10 +389,11 @@ class WP2PcloudFileBackup {
 	/**
 	 * Create ZIP archive procedure.
 	 *
-	 * @param array  $files Array of files to be added to the ZIP archive.
+	 * @param array $files Array of files to be added to the ZIP archive.
 	 * @param string $local_backup_dir Local backup directory.
 	 *
 	 * @return array
+	 * @throws WP2PcloudBackupException
 	 */
 	private function create_zip( array $files, string $local_backup_dir ): array {
 
@@ -370,7 +402,7 @@ class WP2PcloudFileBackup {
 		$final_zip_files = array();
 
 		/**
-		 * STEP 2 -> we will archivate the rest of the files.
+		 * STEP 2 -> we will archive the rest of the files.
 		 */
 
 		wp2pclouddebugger::log( 'ZIP state - start zipping the rest of the files!' );
@@ -379,22 +411,47 @@ class WP2PcloudFileBackup {
 		$num_files      = count( $files );
 		$actually_added = 0;
 
-		// Split archives when PHP memory climbs past 70% of its ceiling. get_memory_limit()
-		// now returns megabytes (or -1 when unlimited); on unlimited we disable splitting by
-		// memory entirely and let the fallback file-size caps do their job.
-		$mem_limit_mb       = WP2PcloudFuncs::get_memory_limit();
-		$max_memory_allowed = ( $mem_limit_mb > 0 )
-			? round( $mem_limit_mb * 0.7, 2 )
-			: PHP_INT_MAX;
+		// Split archives when PHP memory climbs past the working budget. This budget is
+		// ALWAYS a positive number — see WP2PcloudFuncs::get_zip_memory_budget_mb(). Up to
+		// 2.0.6 an unlimited memory_limit (which we set ourselves in set_execution_limits)
+		// made this PHP_INT_MAX, disabling splitting entirely: the whole site went into one
+		// archive, built by a single save_as_file() that logged nothing for its entire
+		// duration and could not be survived on a memory-capped host.
+		$max_memory_allowed = WP2PcloudFuncs::get_zip_memory_budget_mb();
+
+		// Second, independent ceiling. Memory is a lagging indicator — ZipContainer holds a
+		// ZipEntry per file, so a site with very many small files accumulates entries far
+		// faster than it accumulates megabytes. Capping entries bounds both the per-archive
+		// flush time and the blast radius of a killed worker.
+		$max_entries_per_archive = (int) apply_filters( 'pcloud_zip_max_entries', 5000 );
+		if ( $max_entries_per_archive < 100 ) {
+			$max_entries_per_archive = 100;
+		}
+
+		// How often to emit a progress line. Doubles as the liveness heartbeat that the
+		// stuck-backup watchdog reads (see wp2pcl_zip_is_stalled).
+		$heartbeat_every = (int) apply_filters( 'pcloud_zip_heartbeat_entries', 250 );
+		if ( $heartbeat_every < 1 ) {
+			$heartbeat_every = 250;
+		}
+
+		$zip_started_at     = time();
+		$entries_in_current = 0;
+		$bytes_in_current   = 0;
+
+		wp2pclouddebugger::log(
+			'ZIP plan: ' . $num_files . ' files | split at ' . $max_memory_allowed . 'M or '
+			. $max_entries_per_archive . ' entries | heartbeat every ' . $heartbeat_every
+		);
 
 		if ( $num_files > 500000 ) {
-			wp2pcloudfuncs::set_storred_val( PCLOUD_MAX_NUM_FAILURES_NAME, 15000 );
+			wp2pcloudfuncs::set_stored_val( PCLOUD_MAX_NUM_FAILURES_NAME, 15000 );
 		} elseif ( $num_files > 100000 ) {
-			wp2pcloudfuncs::set_storred_val( PCLOUD_MAX_NUM_FAILURES_NAME, 6000 );
+			wp2pcloudfuncs::set_stored_val( PCLOUD_MAX_NUM_FAILURES_NAME, 6000 );
 		} elseif ( $num_files > 40000 ) {
-			wp2pcloudfuncs::set_storred_val( PCLOUD_MAX_NUM_FAILURES_NAME, 3000 );
+			wp2pcloudfuncs::set_stored_val( PCLOUD_MAX_NUM_FAILURES_NAME, 3000 );
 		} elseif ( $num_files > 10000 ) {
-			wp2pcloudfuncs::set_storred_val( PCLOUD_MAX_NUM_FAILURES_NAME, 1000 );
+			wp2pcloudfuncs::set_stored_val( PCLOUD_MAX_NUM_FAILURES_NAME, 1000 );
 		}
 
 		$zip = new ZipFile();
@@ -433,18 +490,43 @@ class WP2PcloudFileBackup {
 				try {
 					$zip->add_file( $file, $file_path_short );
 					$actually_added ++;
+					$entries_in_current ++;
+					$bytes_in_current += intval( $file_size );
 				} catch ( Exception $e ) {
 					wp2pclouddebugger::log( 'ZIP - failed to add file! Error: ' . $e->getMessage() . ' file: ' . $file_path_short );
 				}
 
+				// Progress heartbeat. Before 2.0.7 this loop was completely silent, so a
+				// worker killed mid-ZIP left a debug log whose last line was "start zipping
+				// the rest of the files" — indistinguishable from a backup still running.
+				if ( 0 === ( $actually_added % $heartbeat_every ) ) {
+					self::zip_heartbeat( $actually_added, $num_files, $archive_index, $zip_started_at );
+				}
+
 				$current_mem_usage = floatval( ( memory_get_usage() / 1024 / 1024 ) );
 
-				if ( $current_mem_usage > $max_memory_allowed ) {
+				$over_memory  = $current_mem_usage > $max_memory_allowed;
+				$over_entries = $entries_in_current >= $max_entries_per_archive;
+
+				if ( $over_memory || $over_entries ) {
+
+					wp2pclouddebugger::log(
+						'ZIP split triggered by ' . ( $over_memory ? 'memory' : 'entry count' )
+						. ' [ mem ' . round( $current_mem_usage, 2 ) . 'M / ' . $max_memory_allowed . 'M, '
+						. $entries_in_current . ' entries, ' . wp2pcloudfuncs::format_bytes( $bytes_in_current ) . ' raw ]'
+					);
 
 					try {
 
 						$archive_index_str = str_pad( $archive_index, 3, '0', STR_PAD_LEFT );
 						$final_zip_file    = $local_backup_dir . '/' . $archive_index_str . '_archive.zip';
+
+						// Refresh the liveness stamp on both sides of the write: compressing a
+						// full archive is the longest single operation in the phase and must
+						// not be mistaken for a dead worker.
+						self::zip_heartbeat( $actually_added, $num_files, $archive_index, $zip_started_at );
+
+						$save_started = time();
 
 						$zip->save_as_file( $final_zip_file );
 						$zip->close();
@@ -454,7 +536,13 @@ class WP2PcloudFileBackup {
 						$size = wp2pcloudfuncs::format_bytes( filesize( $final_zip_file ) );
 
 						wp2pcloudlogger::info( "[ $archive_index ] <span class='pcl_transl' data-i10nk='backup_file_size'>Backup file size:</span> ( $size )" );
-						wp2pclouddebugger::log( 'ZIP File ' . $archive_index . ' successfully closed! [ ' . $size . ' ]' );
+						wp2pclouddebugger::log(
+							'ZIP File ' . $archive_index . ' successfully closed! [ ' . $size . ' ] '
+							. '( ' . $entries_in_current . ' entries in ' . ( time() - $save_started ) . 's write, '
+							. wp2pcloudfuncs::format_bytes( memory_get_peak_usage( true ) ) . ' peak )'
+						);
+
+						self::zip_heartbeat( $actually_added, $num_files, $archive_index, $zip_started_at );
 
 					} catch ( Exception $e ) {
 
@@ -467,6 +555,9 @@ class WP2PcloudFileBackup {
 
 					$archive_index++;
 
+					$entries_in_current = 0;
+					$bytes_in_current   = 0;
+
 					$zip = null;
 
 					sleep( 2 );
@@ -478,7 +569,7 @@ class WP2PcloudFileBackup {
 
 		if ( count( $all_skipped_files ) > 0 ) {
 			foreach ( $all_skipped_files as $file ) {
-				wp2pcloudlogger::notification( $file . ' was not addded to the archive because of size or permissions!' );
+				wp2pcloudlogger::notification( $file . ' was not added to the archive because of size or permissions!' );
 			}
 		}
 
@@ -486,6 +577,11 @@ class WP2PcloudFileBackup {
 
 			$archive_index_str = str_pad( $archive_index, 3, '0', STR_PAD_LEFT );
 			$final_zip_file    = $local_backup_dir . '/' . $archive_index_str . '_archive.zip';
+
+			self::zip_heartbeat( $actually_added, $num_files, $archive_index, $zip_started_at );
+
+			$save_started = time();
+
 			$zip->save_as_file( $final_zip_file );
 			$zip->close();
 
@@ -494,7 +590,11 @@ class WP2PcloudFileBackup {
 			$size = wp2pcloudfuncs::format_bytes( filesize( $final_zip_file ) );
 
 			wp2pcloudlogger::info( "[ $archive_index ] <span class='pcl_transl' data-i10nk='backup_file_size'>Backup file size:</span> ( $size )" );
-			wp2pclouddebugger::log( 'ZIP File ' . $archive_index . ' successfully closed! [ ' . $size . ' ]' );
+			wp2pclouddebugger::log(
+				'ZIP File ' . $archive_index . ' successfully closed! [ ' . $size . ' ] '
+				. '( ' . $entries_in_current . ' entries in ' . ( time() - $save_started ) . 's write, '
+				. wp2pcloudfuncs::format_bytes( memory_get_peak_usage( true ) ) . ' peak )'
+			);
 
 		} catch ( Exception $e ) {
 
@@ -506,7 +606,11 @@ class WP2PcloudFileBackup {
 
 		$zip = null;
 
-		wp2pclouddebugger::log( 'ZIP entries added [ ' . $actually_added . ' from ' . $num_files . ' ]' );
+		wp2pclouddebugger::log(
+			'ZIP entries added [ ' . $actually_added . ' from ' . $num_files . ' ] in '
+			. count( $final_zip_files ) . ' archive(s), ' . ( time() - $zip_started_at ) . 's total, '
+			. wp2pcloudfuncs::format_bytes( memory_get_peak_usage( true ) ) . ' peak memory'
+		);
 
 		$num_skipped = count( $files_skipped );
 
@@ -529,7 +633,60 @@ class WP2PcloudFileBackup {
 	}
 
 	/**
-	 * Create remote directory
+	 * Emit a ZIP-phase progress heartbeat.
+	 *
+	 * Two jobs. First, it writes a progress line to the debug log so the phase is no
+	 * longer a silent black box — before 2.0.7 nothing at all was logged between
+	 * "start zipping the rest of the files" and the first closed archive, so a worker
+	 * killed by an fpm timeout or the OOM killer produced a log that looked identical
+	 * to one still running. Second, it stamps `zip_heartbeat` into the operation state,
+	 * which is the liveness signal the stalled-backup watchdog reads
+	 * (see wp2pcl_zip_is_stalled() in the main plugin file).
+	 *
+	 * @param int $done          Entries added so far.
+	 * @param int $total         Total candidate files.
+	 * @param int $archive_index Archive currently being filled (1-based).
+	 * @param int $started_at    Unix time the ZIP phase began.
+	 *
+	 * @return void
+	 */
+	private static function zip_heartbeat( int $done, int $total, int $archive_index, int $started_at ): void {
+
+		static $beats = 0;
+
+		$beats ++;
+
+		$elapsed = time() - $started_at;
+		$percent = ( $total > 0 ) ? round( ( $done / $total ) * 100, 1 ) : 0.0;
+
+		wp2pclouddebugger::log(
+			'ZIP progress: ' . $done . '/' . $total . ' (' . $percent . '%) | archive #'
+			. $archive_index . ' | ' . $elapsed . 's elapsed'
+		);
+
+		// Liveness stamp for the watchdog. Kept in the operation row so any other
+		// request (browser poll or cron tick) can tell a working backup from a dead one.
+		$operation = wp2pcloudfuncs::get_operation();
+
+		if ( isset( $operation['operation'] ) && 'upload' === $operation['operation'] ) {
+			$operation['zip_heartbeat'] = time();
+			$operation['zip_done']      = $done;
+			$operation['zip_total']     = $total;
+			wp2pcloudfuncs::set_operation( $operation );
+		}
+
+		// The user-facing log is capped at 20 KB, so it gets a much coarser cadence than
+		// the debug log — enough to show the backup is alive, not enough to flood it.
+		if ( 0 === ( $beats % 10 ) ) {
+			wp2pcloudlogger::info(
+				"<span class='pcl_transl' data-i10nk='zip_progress'>Compressing files</span>: "
+				. $done . '/' . $total . ' (' . $percent . '%)'
+			);
+		}
+	}
+
+	/**
+	 * Create a remote directory
 	 *
 	 * @param string $dir_name Remote directory name.
 	 *
@@ -575,14 +732,15 @@ class WP2PcloudFileBackup {
 	 * Get Upload directory ID
 	 *
 	 * @return int
+	 * @throws WP2PcloudBackupException
 	 */
 	private function get_upload_dir_id(): int {
 		$last_error = '';
 
-		$backup_file_index = wp2pcloudfuncs::get_storred_val( PCLOUD_BACKUP_FILE_INDEX );
+		$backup_file_index = wp2pcloudfuncs::get_stored_val( PCLOUD_BACKUP_FILE_INDEX );
 		if ( empty( $backup_file_index ) ) {
 			$backup_file_index = time();
-			wp2pcloudfuncs::set_storred_val( PCLOUD_BACKUP_FILE_INDEX, $backup_file_index );
+			wp2pcloudfuncs::set_stored_val( PCLOUD_BACKUP_FILE_INDEX, $backup_file_index );
 		}
 
 		$dir_name       = gmdate( 'Ymd_Hi', $backup_file_index );
@@ -597,11 +755,11 @@ class WP2PcloudFileBackup {
 			$response     = null;
 			$response_raw = '';
 
-			$listfolder_url = $this->apiep . '/listfolder?path=/' . rawurlencode( $final_dir_name ) . '&access_token=' . $this->authkey;
+			$list_folder_url = $this->apiep . '/listfolder?path=/' . rawurlencode( $final_dir_name ) . '&access_token=' . $this->authkey;
 			// Replace the encoded slashes so pCloud receives the path unchanged.
-			$listfolder_url = str_replace( '%2F', '/', $listfolder_url );
+			$list_folder_url = str_replace( '%2F', '/', $list_folder_url );
 
-			$api_response = wp_remote_get( $listfolder_url );
+			$api_response = wp_remote_get( $list_folder_url );
 			if ( is_wp_error( $api_response ) ) {
 				$last_error = $api_response->get_error_message();
 				wp2pclouddebugger::log( 'get_upload_dir_id() - transport error: ' . $last_error );
@@ -770,7 +928,7 @@ class WP2PcloudFileBackup {
 			fclose( $file ); // phpcs:ignore
 		}
 
-		return intval( $uploadoffset );
+		return $uploadoffset;
 	}
 
 
@@ -778,14 +936,13 @@ class WP2PcloudFileBackup {
 	 * Upload procedure
 	 *
 	 * @param string $path File path to be backed-up.
-	 * @param int    $folder_id Folder ID.
 	 * @param int    $upload_id Upload ID.
 	 * @param int    $uploadoffset Upload Offset.
 	 *
 	 * @return int
 	 * @throws Exception Standart Exception can be thrown.
 	 */
-	public function upload( string $path, int $folder_id = 0, int $upload_id = 0, int $uploadoffset = 0 ): int {
+	public function upload( string $path, int $upload_id = 0, int $uploadoffset = 0 ): int {
 		if ( ! file_exists( $path ) || ! is_file( $path ) || ! is_readable( $path ) ) {
 			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='invalid_file_provided'>Invalid file provided!</span>" );
 			wp2pclouddebugger::log( 'upload() -> Invalid file provided!' );
@@ -858,14 +1015,12 @@ class WP2PcloudFileBackup {
 	}
 
 	/**
-	 * Prepare to initiate Upload process
+	 * Prepare to initiate the Upload process
 	 *
 	 * @return stdClass
 	 * @throws Exception Standart Exception can be thrown.
 	 */
 	public function create_upload(): stdClass {
-
-		$last_error = '';
 
 		for ( $i = 1; $i < 4; $i++ ) {
 
@@ -901,7 +1056,7 @@ class WP2PcloudFileBackup {
 	}
 
 	/**
-	 * After successfull upload - we need to call "save" procedure.
+	 * After successfully upload - we need to call "save" procedure.
 	 *
 	 * @param int    $upload_id pCloud Upload ID.
 	 * @param string $name File name to save.
@@ -997,7 +1152,7 @@ class WP2PcloudFileBackup {
 	}
 
 	/**
-	 * Validate the ZIP archives in folder.
+	 * Validate the ZIP archives in the folder.
 	 *
 	 * @param string $target_folder Target folder.
 	 *
@@ -1059,7 +1214,7 @@ class WP2PcloudFileBackup {
 								throw new Exception( 'ZIP file not found! [ ' . $entry . ' ]' );
 
 							default:
-								throw new Exception( 'unknown error occured: ' . $open_archive . ' [ ' . $entry . ' ]' );
+								throw new Exception( 'unknown error occurred: ' . $open_archive . ' [ ' . $entry . ' ]' );
 						}
 					}
 
@@ -1077,7 +1232,7 @@ class WP2PcloudFileBackup {
 	}
 
 	/**
-	 * Set chunk size, based on the archive size.
+	 * Set the chunk size, based on the archive size.
 	 *
 	 * @param int $filesize ZIP Archive file.
 	 *
@@ -1095,10 +1250,11 @@ class WP2PcloudFileBackup {
 	}
 
 	/**
-	 * Get new upload_id in case it's not recognized.
+	 * Get a new upload_id in case it's not recognized.
 	 *
 	 * @return void
 	 * @throws Exception
+	 * @deprecated Do we need this method?
 	 */
 	public function get_new_upload_id(): void {
 

@@ -32,7 +32,7 @@ use RecursiveIteratorIterator;
 use SplFileInfo;
 
 /**
- * Create, open .ZIP files, modify, get info and extract files.
+ * Create, open .ZIP files, modify, get info, and extract files.
  *
  * Implemented support traditional PKWARE encryption and WinZip AES encryption.
  * Implemented support ZIP64.
@@ -62,7 +62,7 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	}
 
 	/**
-	 * Create zip writer.
+	 * Create a zip writer.
 	 *
 	 * @return ZipWriter
 	 */
@@ -71,7 +71,7 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	}
 
 	/**
-	 * Create zip container.
+	 * Create a zip container.
 	 *
 	 * @param ImmutableZipContainer|null $source_container Source container.
 	 * @return ZipContainer
@@ -127,7 +127,7 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 		);
 
 		/**
-		 * We are increasing the number of optins.
+		 * We are increasing the number of options.
 		 *
 		 * @noinspection AdditionOperationOnArraysInspection
 		 */
@@ -483,9 +483,9 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	}
 
 	/**
-	 * Add array data to archive.
-	 * Keys is local names.
-	 * Values is contents.
+	 * Add array data to the archive.
+	 * Keys equal local names.
+	 * Value equals contents.
 	 *
 	 * @param array $map_data Associative array for added to zip.
 	 * @return void
@@ -513,7 +513,7 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	}
 
 	/**
-	 * Save as file.
+	 * Save as a file.
 	 *
 	 * @param string $filename Output filename.
 	 * @return ZipFile
@@ -550,7 +550,7 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	}
 
 	/**
-	 * Save as stream.
+	 * Save as a stream.
 	 *
 	 * @param resource $handle Output stream resource.
 	 * @return ZipFile
@@ -589,7 +589,7 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	}
 
 	/**
-	 * Close zip archive and release input stream.
+	 * Close the zip archive and release the input stream.
 	 *
 	 * @return void
 	 */
@@ -679,7 +679,7 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	}
 
 	/**
-	 * Move forward to next element.
+	 * Move forward to the next element.
 	 *
 	 * @return void
 	 */
@@ -688,7 +688,7 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	}
 
 	/**
-	 * Checks if current position is valid.
+	 * Checks if the current position is valid.
 	 *
 	 * @return bool The return value will cast to boolean and then evaluated.
 	 *              Returns true on success or false on failure.

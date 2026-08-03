@@ -22,7 +22,7 @@ class WP2PcloudDebugger {
 	 */
 	public static function generate_new( ?string $initial_message = '' ): void {
 
-		wp2pcloudfuncs::set_storred_val( PCLOUD_DBG_LOG, $initial_message );
+		wp2pcloudfuncs::set_stored_val( PCLOUD_DBG_LOG, $initial_message );
 
 	}
 
@@ -34,7 +34,7 @@ class WP2PcloudDebugger {
 	 * @return string
 	 */
 	public static function read_last_log( ?bool $as_json = true ): string {
-		$log = (string) wp2pcloudfuncs::get_storred_val( PCLOUD_DBG_LOG );
+		$log = (string) wp2pcloudfuncs::get_stored_val( PCLOUD_DBG_LOG );
 
 		if ( $as_json ) {
 			return wp_json_encode( array( 'log' => $log ) );
@@ -64,7 +64,7 @@ class WP2PcloudDebugger {
 			return;
 		}
 
-		$current_data = (string) wp2pcloudfuncs::get_storred_val( PCLOUD_DBG_LOG );
+		$current_data = (string) wp2pcloudfuncs::get_stored_val( PCLOUD_DBG_LOG );
 		$mem_usage    = wp2pcloudfuncs::memory_usage();
 
 		if ( 'uploading' === $new_data ) {
@@ -83,6 +83,6 @@ class WP2PcloudDebugger {
 			$current_data = substr( $current_data, -30000 );
 		}
 
-		wp2pcloudfuncs::set_storred_val( PCLOUD_DBG_LOG, $current_data );
+		wp2pcloudfuncs::set_stored_val( PCLOUD_DBG_LOG, $current_data );
 	}
 }

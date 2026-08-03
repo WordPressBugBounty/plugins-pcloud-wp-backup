@@ -18,7 +18,7 @@ use Throwable;
  *
  * The previous implementation walked the full Pcloud/Classes/ tree on every single class
  * resolution, because the `foreach ($file_iterator as $file)` pattern calls rewind() and
- * restats every file on each call. Loading a dozen classes during a backup meant hundreds
+ * restarts every file on each call. Loading a dozen classes during a backup meant hundreds
  * of redundant stat syscalls.
  *
  * This revision walks the tree once on first lookup and caches a filename→path map. All
@@ -41,7 +41,7 @@ class Autoloader {
 	/**
 	 * Lowercase filename (without `class-` prefix and without `.php`) → absolute path.
 	 *
-	 * Populated lazily on first autoload call via `build_class_map()`.
+	 * Populated lazily on the first autoload call via `build_class_map()`.
 	 *
 	 * @var array<string, string>|null
 	 */
@@ -113,14 +113,14 @@ class Autoloader {
 				continue;
 			}
 
-			// Strip .php, then strip optional class- prefix. Match both forms under the
+			// Strip .php, then strip optional class-prefix. Match both forms under the
 			// same lookup key so loader() can find either naming style.
 			$base = strtolower( substr( $name, 0, -4 ) );
 			if ( str_starts_with( $base, 'class-' ) ) {
 				$base = substr( $base, 6 );
 			}
 
-			// First match wins. Duplicate basenames across the tree are not expected; if
+			// First match wins. Duplicate basename across the tree are not expected; if
 			// they ever appear, they are a code-organization bug we'd want to notice.
 			if ( ! isset( self::$class_map[ $base ] ) ) {
 				self::$class_map[ $base ] = $file->getPathname();

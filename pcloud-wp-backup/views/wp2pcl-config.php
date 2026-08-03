@@ -8,8 +8,8 @@
 
 use Pcloud\Classes\wp2pcloudfuncs;
 
-$auth      = wp2pcloudfuncs::get_storred_val( PCLOUD_AUTH_KEY );
-$auth_mail = wp2pcloudfuncs::get_storred_val( PCLOUD_AUTH_MAIL );
+$auth      = wp2pcloudfuncs::get_stored_val( PCLOUD_AUTH_KEY );
+$auth_mail = wp2pcloudfuncs::get_stored_val( PCLOUD_AUTH_MAIL );
 
 $php_extensions          = get_loaded_extensions();
 $has_zip_ext_installed   = array_search( 'zip', $php_extensions, true );
@@ -17,7 +17,7 @@ $has_finfo_ext_installed = array_search( 'fileinfo', $php_extensions, true );
 $has_pdo_ext_installed   = array_search( 'PDO', $php_extensions, true );
 $has_json_ext_installed  = array_search( 'json', $php_extensions, true );
 
-$lastbackupdt_tm  = intval( wp2pcloudfuncs::get_storred_val( PCLOUD_LAST_BACKUPDT ) );
+$lastbackupdt_tm  = intval( wp2pcloudfuncs::get_stored_val( PCLOUD_LAST_BACKUPDT ) );
 $last_backup_data = ( $lastbackupdt_tm > 9999 ) ? gmdate( 'd.m.Y H:i:s', $lastbackupdt_tm ) : '';
 
 if ( PCLOUD_DEBUG ) {
@@ -39,12 +39,12 @@ if ( PCLOUD_DEBUG ) {
 	);
 }
 
-$sched           = wp2pcloudfuncs::get_storred_val( PCLOUD_SCHDATA_KEY );
-$sched_hour_from = wp2pcloudfuncs::get_storred_val( PCLOUD_SCHHOUR_FROM_KEY );
-$sched_hour_to   = wp2pcloudfuncs::get_storred_val( PCLOUD_SCHHOUR_TO_KEY );
+$sched           = wp2pcloudfuncs::get_stored_val( PCLOUD_SCHDATA_KEY );
+$sched_hour_from = wp2pcloudfuncs::get_stored_val( PCLOUD_SCHHOUR_FROM_KEY );
+$sched_hour_to   = wp2pcloudfuncs::get_stored_val( PCLOUD_SCHHOUR_TO_KEY );
 
 $wp2pcl_withmysql_chk = 'checked="checked"';
-$wp2pcl_withmysql     = wp2pcloudfuncs::get_storred_val( PCLOUD_SCHDATA_INCLUDE_MYSQL );
+$wp2pcl_withmysql     = wp2pcloudfuncs::get_stored_val( PCLOUD_SCHDATA_INCLUDE_MYSQL );
 if ( empty( $wp2pcl_withmysql ) || intval( $wp2pcl_withmysql ) < 1 ) {
 	$wp2pcl_withmysql_chk = '';
 }
@@ -61,9 +61,9 @@ if ( count( $pl_dir_arr ) > 3 ) {
 }
 
 
-$wp2pcl_api_location = wp2pcloudfuncs::get_storred_val( PCLOUD_API_LOCATIONID );
+$wp2pcl_api_location = wp2pcloudfuncs::get_stored_val( PCLOUD_API_LOCATIONID );
 if ( empty( $wp2pcl_api_location ) || intval( $wp2pcl_api_location ) < 1 ) {
-	wp2pcloudfuncs::set_storred_val( PCLOUD_API_LOCATIONID, 1 );
+	wp2pcloudfuncs::set_stored_val( PCLOUD_API_LOCATIONID, 1 );
 	$wp2pcl_api_server = 1;
 }
 
@@ -104,7 +104,7 @@ if ( empty( $auth ) ) {
 	$auth_url .= '&amp;redirect_uri=' . rawurlencode( 'https://wpoauth2.pcloud.com/' );
 }
 
-$recent_notifications_db = wp2pcloudfuncs::get_storred_val( PCLOUD_NOTIFICATIONS );
+$recent_notifications_db = wp2pcloudfuncs::get_stored_val( PCLOUD_NOTIFICATIONS );
 if ( ! empty( $recent_notifications_db ) ) {
 	$recent_notifications = json_decode( $recent_notifications_db, true );
 } else {
@@ -112,7 +112,7 @@ if ( ! empty( $recent_notifications_db ) ) {
 }
 
 if ( count( $recent_notifications ) > 0 ) {
-	wp2pcloudfuncs::set_storred_val( PCLOUD_NOTIFICATIONS, '[]' );
+	wp2pcloudfuncs::set_stored_val( PCLOUD_NOTIFICATIONS, '[]' );
 }
 
 ?>
