@@ -9,7 +9,7 @@
  * Plugin URI: https://www.pcloud.com
  * Summary: pCloud WP Backup plugin
  * Description: pCloud WP Backup has been created to make instant backups of your blog and its data, regularly.
- * Version: 2.0.8
+ * Version: 2.0.9
  * Requires PHP: 8.0
  * Author: pCloud
  * URI: https://www.pcloud.com
@@ -27,6 +27,7 @@ use Pcloud\Classes\wp2pcloudfilerestore;
 use Pcloud\Classes\wp2pcloudfuncs;
 use Pcloud\Classes\wp2pcloudlogger;
 use Pcloud\Classes\WP2PcloudRatingPrompt;
+use Pcloud\Classes\WP2PcloudUploadException;
 
 require plugin_dir_path( __FILE__ ) . 'Pcloud/class-autoloader.php';
 
@@ -50,6 +51,12 @@ if ( ! defined( 'PCLOUD_SCHHOUR_TO_KEY' ) ) {
 }
 if ( ! defined( 'PCLOUD_SCHDATA_INCLUDE_MYSQL' ) ) {
 	define( 'PCLOUD_SCHDATA_INCLUDE_MYSQL', 'wp2pcl_include_mysql' );
+}
+if ( ! defined( 'PCLOUD_EXCLUDE_FILES' ) ) {
+	define( 'PCLOUD_EXCLUDE_FILES', 'wp2pcl_exclude_files' ); // Newline-separated paths/patterns relative to ABSPATH.
+}
+if ( ! defined( 'PCLOUD_EXCLUDE_TABLES' ) ) {
+	define( 'PCLOUD_EXCLUDE_TABLES', 'wp2pcl_exclude_tables' ); // Newline-separated table names left out of the DB dump.
 }
 if ( ! defined( 'PCLOUD_OPERATION' ) ) {
 	define( 'PCLOUD_OPERATION', 'wp2pcl_operation' );
@@ -96,6 +103,11 @@ if ( ! defined( 'PCLOUD_DEBUG' ) ) {
 }
 if ( ! defined( 'PCLOUD_PLUGIN_MIN_PHP_VERSION' ) ) {
 	define( 'PCLOUD_PLUGIN_MIN_PHP_VERSION', '8.0' );
+}
+if ( ! defined( 'PCLOUD_PLUGIN_VERSION' ) ) {
+	// Single source of truth for the running version: drives the upgrade routine and the
+	// cache-busting `ver` on our JS/CSS. Keep in sync with the `Version:` header above.
+	define( 'PCLOUD_PLUGIN_VERSION', '2.0.9' );
 }
 
 // The maximum number of failures allowed.
@@ -292,6 +304,123 @@ function wp2pcl_ajax_process_request_inner(): void {
 		wp2pcloudfuncs::set_stored_val( PCLOUD_SCHDATA_INCLUDE_MYSQL, $withmysql );
 
 		$result['status'] = 0;
+
+	} elseif ( 'set_exclusions' === $m ) {
+
+		if ( ! isset( $_POST['wp2pcl_nonce'] ) || ! wp_verify_nonce( sanitize_key( $_POST['wp2pcl_nonce'] ) ) ) {
+			$result['status']   = 15;
+			$result['msg']      = '<p>Failed to validate the request!</p>';
+			$result['sitename'] = $sitename;
+
+			echo wp_json_encode( $result );
+
+			return;
+		}
+
+		// File / folder patterns: one per line, relative to the WordPress root.
+		$files_raw = isset( $_POST['wp2pcl_exclude_files'] ) ? sanitize_textarea_field( wp_unslash( $_POST['wp2pcl_exclude_files'] ) ) : '';
+		$patterns  = array();
+		foreach ( (array) preg_split( '/\r\n|\r|\n/', $files_raw ) as $line ) {
+			$line = wp2pcloudfuncs::normalize_exclude_pattern( (string) $line );
+			if ( '' === $line || '..' === $line || str_contains( $line, '../' ) || preg_match( '/^[*?\/]+$/', $line ) ) {
+				continue; // Empty, path-escaping, or "exclude everything" entries are dropped.
+			}
+			$patterns[] = $line;
+		}
+		$patterns = array_values( array_unique( $patterns ) );
+
+		// Database tables: checkbox list of existing table names.
+		$tables = array();
+		if ( isset( $_POST['wp2pcl_exclude_tables'] ) ) {
+			$raw_tables = wp_unslash( $_POST['wp2pcl_exclude_tables'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- each item sanitised below.
+			$raw_tables = is_array( $raw_tables ) ? $raw_tables : preg_split( '/\r\n|\r|\n|,/', (string) $raw_tables );
+			foreach ( array_map( 'sanitize_text_field', (array) $raw_tables ) as $table ) {
+				$table = trim( (string) $table );
+				if ( preg_match( '/^[A-Za-z0-9_$\-]+$/', $table ) ) {
+					$tables[] = $table;
+				}
+			}
+		}
+		$tables = array_values( array_unique( $tables ) );
+
+		wp2pcloudfuncs::set_stored_val( PCLOUD_EXCLUDE_FILES, implode( "\n", $patterns ) );
+		wp2pcloudfuncs::set_stored_val( PCLOUD_EXCLUDE_TABLES, implode( "\n", $tables ) );
+
+		wp2pclouddebugger::log( 'set_exclusions() - ' . count( $patterns ) . ' file pattern(s), ' . count( $tables ) . ' table(s)' );
+
+		$result['status']         = 0;
+		$result['exclude_files']  = $patterns;
+		$result['exclude_tables'] = $tables;
+
+	} elseif ( 'list_dir' === $m ) {
+
+		if ( ! isset( $_GET['wp2pcl_nonce'] ) || ! wp_verify_nonce( sanitize_key( $_GET['wp2pcl_nonce'] ) ) ) {
+			$result['status']   = 15;
+			$result['msg']      = '<p>Failed to validate the request!</p>';
+			$result['sitename'] = $sitename;
+
+			echo wp_json_encode( $result );
+
+			return;
+		}
+
+		// Directory listing for the exclusion picker. Read-only (names, type, size), and
+		// confined to the WordPress root: `..` is rejected and the resolved directory must
+		// stay under realpath( ABSPATH ).
+		$rel  = isset( $_GET['path'] ) ? sanitize_text_field( wp_unslash( $_GET['path'] ) ) : '';
+		$rel  = wp2pcloudfuncs::normalize_exclude_pattern( $rel );
+		$root = wp_normalize_path( (string) realpath( ABSPATH ) );
+		$abs  = ( '' === $rel ) ? $root : realpath( $root . '/' . $rel );
+		$abs  = is_string( $abs ) ? wp_normalize_path( $abs ) : '';
+
+		if ( '' === $root || '' === $abs || str_contains( $rel, '..' ) || ! is_dir( $abs ) || ( $abs !== $root && ! str_starts_with( $abs, $root . '/' ) ) ) {
+			$result['status'] = 16;
+			$result['msg']    = 'Invalid directory';
+
+			echo wp_json_encode( $result );
+
+			return;
+		}
+
+		$dirs      = array();
+		$files     = array();
+		$truncated = false;
+		$max       = 1500;
+
+		$handle = opendir( $abs ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		if ( false !== $handle ) {
+			while ( false !== ( $name = readdir( $handle ) ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+				if ( '.' === $name || '..' === $name ) {
+					continue;
+				}
+				if ( is_dir( $abs . '/' . $name ) ) {
+					$dirs[] = $name;
+				} else {
+					$files[ $name ] = (int) @filesize( $abs . '/' . $name ); // phpcs:ignore
+				}
+				if ( count( $dirs ) + count( $files ) >= $max ) {
+					$truncated = true;
+					break;
+				}
+			}
+			closedir( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		}
+
+		natcasesort( $dirs );
+		ksort( $files, SORT_NATURAL | SORT_FLAG_CASE );
+
+		$entries = array();
+		foreach ( $dirs as $name ) {
+			$entries[] = array( 'name' => $name, 'type' => 'dir' );
+		}
+		foreach ( $files as $name => $size ) {
+			$entries[] = array( 'name' => $name, 'type' => 'file', 'size' => $size );
+		}
+
+		$result['status']    = 0;
+		$result['path']      = ( $abs === $root ) ? '' : ltrim( substr( $abs, strlen( $root ) ), '/' );
+		$result['entries']   = $entries;
+		$result['truncated'] = $truncated;
 
 	} elseif ( 'userinfo' === $m ) {
 
@@ -770,7 +899,7 @@ function wp2pcl_zip_is_stalled( array $operation ): bool {
  */
 function wp2pcl_event_processor(): array {
 
-	global $plugin_path_base;
+	global $plugin_path_base, $wpdb;
 
 	$result = array(
 		'status'  => 1, // 0: OK, 1+: error
@@ -783,10 +912,35 @@ function wp2pcl_event_processor(): array {
 	// two tabs, or cron fires while a poll is in flight) used to race and could double-advance
 	// the state machine — e.g., both transitioning `ready_to_push` -> `uploading_chunks` and
 	// racing to upload chunks against the same upload_id.
+	//
+	// The lock has to be atomic. The original transient lock was check-then-set (get_transient,
+	// then set_transient) and two polls arriving within the same few milliseconds — a second
+	// admin tab, a reload while the old tab still polls, a cron tick spawned by the poll
+	// itself — both got through and pushed the same chunk to pCloud; the second write then
+	// failed with 2068. Seen live on wp.cincev.com 2026-09-18 (three times in one manual
+	// backup). MySQL's GET_LOCK() is atomic, connection-scoped, and released automatically
+	// when the request's DB connection closes, so a fatal mid-chunk cannot leave it stuck.
+	// The transient stays as a best-effort fallback where GET_LOCK() is unavailable.
 	$lock_key  = 'wp2pcl_op_lock';
-	$lock_ttl  = 30; // seconds
+	$lock_ttl  = 30; // seconds (transient fallback only)
+	$lock_name = 'wp2pcl_op_' . md5( DB_NAME . '|' . $wpdb->prefix );
 	$lock_held = false;
-	if ( function_exists( 'get_transient' ) ) {
+	$lock_via  = '';
+
+	$got_lock = $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK( %s, 0 )', $lock_name ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+	if ( '1' === (string) $got_lock ) {
+		$lock_held = true;
+		$lock_via  = 'mysql';
+	} elseif ( '0' === (string) $got_lock ) {
+		// Someone else holds it right now.
+		$result['status'] = 0;
+		$result['busy']   = true;
+		return array(
+			'operation' => $operation,
+			'result'    => $result,
+		);
+	} elseif ( function_exists( 'get_transient' ) ) {
+		// GET_LOCK() unavailable (NULL / error): fall back to the transient.
 		if ( false !== get_transient( $lock_key ) ) {
 			$result['status'] = 0;
 			$result['busy']   = true;
@@ -797,7 +951,11 @@ function wp2pcl_event_processor(): array {
 		}
 		set_transient( $lock_key, 1, $lock_ttl );
 		$lock_held = true;
+		$lock_via  = 'transient';
 	}
+
+	// Re-read under the lock: the copy fetched above may predate another worker's last write.
+	$operation = wp2pcloudfuncs::get_operation();
 
 	try {
 
@@ -918,9 +1076,23 @@ function wp2pcl_event_processor(): array {
 						$result['size']      = $size;
 						$result['sizefancy'] = '~' . round( ( $size / 1024 / 1024 ), 2 ) . ' MB';
 
+						// A worker killed mid-chunk leaves chunkstate = 'uploading' behind forever, and
+						// every later tick would then count a failure without ever uploading. Treat a
+						// chunk that has been "in flight" for too long as dead and let the next tick
+						// retry it (the 2068 resync in the upload routines sorts out the real offset).
+						if ( 'uploading' === $operation['chunkstate'] ) {
+							$chunk_since   = intval( $operation['chunk_since'] ?? 0 );
+							$stall_timeout = intval( apply_filters( 'pcloud_chunk_stall_timeout', 15 * MINUTE_IN_SECONDS ) );
+							if ( $chunk_since > 0 && ( time() - $chunk_since ) > $stall_timeout ) {
+								wp2pclouddebugger::log( 'event_processor() - chunk in flight since ' . gmdate( 'Y-m-d H:i:s', $chunk_since ) . ' looks dead; resetting chunkstate' );
+								$operation['chunkstate'] = 'OK';
+							}
+						}
+
 						if ( 'OK' === $operation['chunkstate'] ) {
 
-							$operation['chunkstate'] = 'uploading';
+							$operation['chunkstate']  = 'uploading';
+							$operation['chunk_since'] = time();
 
 							wp2pcloudfuncs::set_operation( $operation );
 
@@ -937,6 +1109,29 @@ function wp2pcl_event_processor(): array {
 										$newoffset = $file_op->upload_chunk( $path, $folder_id, $upload_id, $offset, $operation['failures'] );
 									}
 								}
+							} catch ( WP2PcloudUploadException $e ) {
+								wp2pclouddebugger::log( 'event_processor() upload exception: ' . $e->getMessage() );
+								wp2pcloudlogger::info( 'Upload error: ' . $e->getMessage() );
+
+								if ( $e->is_session_unusable() ) {
+									// pCloud will never accept this session again: open a fresh one and
+									// upload the current file again from the start.
+									try {
+										$upload                 = $file_op->create_upload();
+										$operation['upload_id'] = intval( $upload->uploadid );
+										$operation['offset']    = 0;
+										$offset                 = 0;
+										$newoffset              = 0;
+										wp2pclouddebugger::log( 'event_processor() - restarting file ' . $current_file . ' on new upload session ' . $operation['upload_id'] );
+										wp2pcloudlogger::info( 'Restarting upload of ' . esc_html( basename( $selected_file ) ) . ' on a new pCloud upload session.' );
+									} catch ( Exception $create_e ) {
+										wp2pclouddebugger::log( 'event_processor() create_upload failed while restarting file: ' . $create_e->getMessage() );
+										$newoffset = $offset; // Counts as a failure; try again next tick.
+									}
+								} else {
+									// Keep whatever progress the upload routine made before it gave up.
+									$newoffset = max( $offset, $e->get_reached_offset() );
+								}
 							} catch ( Exception $e ) {
 								wp2pclouddebugger::log( 'event_processor() upload exception: ' . $e->getMessage() );
 								wp2pcloudlogger::info( 'Upload error: ' . $e->getMessage() );
@@ -945,10 +1140,28 @@ function wp2pcl_event_processor(): array {
 
 							$result['newoffset']     = $newoffset;
 							$operation['chunkstate'] = 'OK';
+							unset( $operation['chunk_since'] );
 
 						} else {
+							// Another worker is pushing this chunk right now. Persisting our copy of
+							// the operation here would overwrite whatever it writes when it finishes
+							// (e.g. its chunkstate = 'OK' and advanced offset) and leave the backup
+							// wedged in 'uploading'. Only make sure the in-flight marker is dated so
+							// the stall check above can reclaim it, then leave.
+							$fresh = wp2pcloudfuncs::get_operation();
+							if ( 'uploading' === ( $fresh['chunkstate'] ?? '' ) && empty( $fresh['chunk_since'] ) ) {
+								$fresh['chunk_since'] = time();
+								wp2pcloudfuncs::set_operation( $fresh );
+							}
+
+							$result['status']    = 0;
+							$result['busy']      = true;
 							$result['newoffset'] = $offset;
-							$newoffset           = $offset;
+
+							return array(
+								'operation' => $fresh,
+								'result'    => $result,
+							);
 						}
 
 						if ( $newoffset <= $offset ) {
@@ -1190,7 +1403,9 @@ function wp2pcl_event_processor(): array {
 		}
 	}
 	} finally {
-		if ( $lock_held && function_exists( 'delete_transient' ) ) {
+		if ( $lock_held && 'mysql' === $lock_via ) {
+			$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK( %s )', $lock_name ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		} elseif ( $lock_held && function_exists( 'delete_transient' ) ) {
 			delete_transient( $lock_key );
 		}
 	}
@@ -1478,7 +1693,9 @@ function wp2pcloud_display_settings(): void {
 		}
 	}
 
-	$static_files_ver = '2.0.0.1';
+	// Was a hard-coded '2.0.0.1' that never changed, so browsers kept serving cached
+	// wp2pcl.js / CSS from older releases after every update.
+	$static_files_ver = PCLOUD_PLUGIN_VERSION;
 
 	wp_enqueue_script( 'wp2pcl-scr', plugins_url( '/assets/js/wp2pcl.js', __FILE__ ), array(), $static_files_ver, true );
 	wp_enqueue_style( 'wpb2pcloud', plugins_url( '/assets/css/wpb2pcloud.css', __FILE__ ), array(), $static_files_ver );
@@ -1515,6 +1732,8 @@ function wp2pcl_install(): void {
 	wp2pcloudfuncs::get_stored_val( PCLOUD_SCHHOUR_FROM_KEY, '-1' );
 	wp2pcloudfuncs::get_stored_val( PCLOUD_SCHHOUR_TO_KEY, '-1' );
 	wp2pcloudfuncs::get_stored_val( PCLOUD_SCHDATA_INCLUDE_MYSQL, '1' );
+	wp2pcloudfuncs::get_stored_val( PCLOUD_EXCLUDE_FILES, '' );
+	wp2pcloudfuncs::get_stored_val( PCLOUD_EXCLUDE_TABLES, '' );
 	wp2pcloudfuncs::get_stored_val( PCLOUD_OPERATION );
 	wp2pcloudfuncs::get_stored_val( PCLOUD_HAS_ACTIVITY, '0' );
 	wp2pcloudfuncs::get_stored_val( PCLOUD_LOG );
@@ -1590,6 +1809,8 @@ function wp2pcl_uninstall(): void {
 	delete_option( PCLOUD_SCHHOUR_FROM_KEY );
 	delete_option( PCLOUD_SCHHOUR_TO_KEY );
 	delete_option( PCLOUD_SCHDATA_INCLUDE_MYSQL );
+	delete_option( PCLOUD_EXCLUDE_FILES );
+	delete_option( PCLOUD_EXCLUDE_TABLES );
 	delete_option( PCLOUD_OPERATION );
 	delete_option( PCLOUD_HAS_ACTIVITY );
 	delete_option( PCLOUD_LOG );
@@ -1771,7 +1992,7 @@ if ( ! function_exists( 'pcloud_plugin_php_memory_limit_error' ) ) {
 function wp2pcl_maybe_upgrade(): void {
 
 	$version_key     = 'wp2pcl_plugin_version';
-	$current_version = '2.0.8';
+	$current_version = PCLOUD_PLUGIN_VERSION;
 	$stored_version  = get_option( $version_key, '' );
 
 	if ( $stored_version === $current_version ) {

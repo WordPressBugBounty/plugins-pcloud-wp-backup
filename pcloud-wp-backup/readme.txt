@@ -2,9 +2,9 @@
 Contributors: ploudapp, the_root
 Tags: backup, pCloud
 Requires at least: 5.0
-Tested up to: 7.0.2
+Tested up to: 7.1.1
 Requires PHP: 8.0
-Stable tag: 2.0.8
+Stable tag: 2.0.9
 License: GPLv3 or later
 
 The pCloud WP Backup plugin will help you backup everything on your blog with one click and store it in the cloud in the most secure way.
@@ -57,6 +57,14 @@ If the manual backup mode works it means that the plugin is functioning correctl
 1. Here is a screenshot of the plugin in action
 
 == Changelog ==
+
+= 2.0.9 =
+* New: exclude files and folders from the backup. Browse your site and pick them from the settings page, or add patterns such as *.log.
+* New: exclude database tables from the backup.
+* Fix: an upload interrupted part-way could get stuck retrying the same point indefinitely. The plugin now resumes from where pCloud actually is, or restarts the file on a fresh upload session.
+* Fix: two overlapping progress requests could upload the same piece of an archive twice. Progress updates are now serialised.
+* Fix: the settings page did not load on sites where another plugin's script defined the same global name ("Identifier '__' has already been declared").
+* Fix: browsers could keep using the plugin's previous script and stylesheet after an update.
 
 = 2.0.8 =
 * Security: improved protection of the plugin's temporary working directory. Updating is recommended.

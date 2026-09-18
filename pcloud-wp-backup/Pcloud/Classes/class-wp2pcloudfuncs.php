@@ -456,4 +456,121 @@ class WP2PcloudFuncs {
 
 		return $snapshot;
 	}
+
+	/**
+	 * Read a newline-separated option as a clean, de-duplicated list of lines.
+	 *
+	 * @param string $key Option name.
+	 *
+	 * @return string[]
+	 */
+	public static function get_stored_list( string $key ): array {
+
+		$raw   = (string) self::get_stored_val( $key, '' );
+		$lines = array();
+
+		foreach ( (array) preg_split( '/\r\n|\r|\n/', $raw ) as $line ) {
+			$line = trim( (string) $line );
+			if ( '' !== $line ) {
+				$lines[] = $line;
+			}
+		}
+
+		return array_values( array_unique( $lines ) );
+	}
+
+	/**
+	 * Canonical form of a user exclusion pattern: forward slashes, no leading "./" or "/",
+	 * no trailing slash.
+	 *
+	 * @param string $pattern Raw pattern.
+	 *
+	 * @return string
+	 */
+	public static function normalize_exclude_pattern( string $pattern ): string {
+
+		$pattern = str_replace( '\\', '/', trim( $pattern ) );
+		$pattern = (string) preg_replace( '#^(\./|/)+#', '', $pattern );
+
+		return trim( rtrim( $pattern, '/' ) );
+	}
+
+	/**
+	 * User-configured file/folder exclusion patterns, relative to the WordPress root.
+	 *
+	 * Filter `pcloud_exclude_patterns` lets code adjust the list.
+	 *
+	 * @return string[]
+	 */
+	public static function get_exclude_patterns(): array {
+
+		$patterns = array();
+		foreach ( self::get_stored_list( PCLOUD_EXCLUDE_FILES ) as $pattern ) {
+			$pattern = self::normalize_exclude_pattern( $pattern );
+			if ( '' !== $pattern ) {
+				$patterns[] = $pattern;
+			}
+		}
+
+		$patterns = apply_filters( 'pcloud_exclude_patterns', $patterns );
+
+		return is_array( $patterns ) ? array_values( array_unique( array_map( 'strval', $patterns ) ) ) : array();
+	}
+
+	/**
+	 * Whether a path relative to the WordPress root is excluded by the given patterns.
+	 *
+	 * A pattern matches the entry itself and, when it names a folder, everything beneath
+	 * it. `*` and `?` wildcards are supported; `*` also crosses directory separators, so
+	 * `*.log` catches log files at any depth.
+	 *
+	 * @param string   $relative_path Path relative to the root, forward slashes.
+	 * @param string[] $patterns      Normalised patterns.
+	 *
+	 * @return bool
+	 */
+	public static function is_excluded_path( string $relative_path, array $patterns ): bool {
+
+		if ( empty( $patterns ) ) {
+			return false;
+		}
+
+		$relative_path = ltrim( str_replace( '\\', '/', $relative_path ), '/' );
+
+		foreach ( $patterns as $pattern ) {
+			if ( $relative_path === $pattern || str_starts_with( $relative_path, $pattern . '/' ) ) {
+				return true;
+			}
+			if ( fnmatch( $pattern, $relative_path ) ) {
+				return true;
+			}
+			// `folder/*` also prunes the folder itself so the walk never enters it.
+			if ( str_ends_with( $pattern, '/*' ) && substr( $pattern, 0, -2 ) === $relative_path ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * User-configured database tables to leave out of the dump (exact names; `*` allowed).
+	 *
+	 * Filter `pcloud_exclude_tables` lets code adjust the list.
+	 *
+	 * @return string[]
+	 */
+	public static function get_excluded_tables(): array {
+
+		$tables = array();
+		foreach ( self::get_stored_list( PCLOUD_EXCLUDE_TABLES ) as $table ) {
+			if ( preg_match( '/^[A-Za-z0-9_$*\-]+$/', $table ) ) {
+				$tables[] = $table;
+			}
+		}
+
+		$tables = apply_filters( 'pcloud_exclude_tables', $tables );
+
+		return is_array( $tables ) ? array_values( array_unique( array_map( 'strval', $tables ) ) ) : array();
+	}
 }

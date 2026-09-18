@@ -19,6 +19,14 @@ use ZipArchive;
 class WP2PcloudFileBackup {
 
 	/**
+	 * pCloud `upload_write` result when the request offset does not match what the
+	 * session already holds ("Error writing to upload.").
+	 *
+	 * @var int
+	 */
+	public const PCLOUD_ERR_UPLOAD_WRITE = 2068;
+
+	/**
 	 * Authentication key
 	 *
 	 * @var string|null $authkey API authentication key.
@@ -45,6 +53,27 @@ class WP2PcloudFileBackup {
 	 * @var string[] $skip_folders
 	 */
 	private array $skip_folders = array( '.idea', '.code', 'wp-pcloud-backup', 'pcloud-wp-backup', 'wp2pcloud_tmp' );
+
+	/**
+	 * User-configured exclusion patterns (relative to the WordPress root), loaded in start().
+	 *
+	 * @var string[] $exclude_patterns
+	 */
+	private array $exclude_patterns = array();
+
+	/**
+	 * Root of the current file walk with forward slashes, used to build relative paths.
+	 *
+	 * @var string $scan_root
+	 */
+	private string $scan_root = '';
+
+	/**
+	 * Files and folders skipped by the exclusion patterns during the current walk.
+	 *
+	 * @var int $excluded_count
+	 */
+	private int $excluded_count = 0;
 
 	/**
 	 * The size in bytes of each uploaded/downloaded chunk.
@@ -149,14 +178,27 @@ class WP2PcloudFileBackup {
 
 		wp2pclouddebugger::log( 'Creating a list of files to be compressed!' );
 
+		// User-configured exclusions (settings page, filter `pcloud_exclude_patterns`).
+		$this->scan_root        = rtrim( str_replace( '\\', '/', $root_dir ), '/' );
+		$this->exclude_patterns = wp2pcloudfuncs::get_exclude_patterns();
+		$this->excluded_count   = 0;
+		if ( ! empty( $this->exclude_patterns ) ) {
+			wp2pclouddebugger::log( 'Exclusion patterns: ' . implode( ' | ', $this->exclude_patterns ) );
+		}
+
 		$scan_started = time();
 
 		$files = self::find_all_files( $root_dir );
 
 		wp2pclouddebugger::log(
 			'The List of all files is ready and will be sent for compression! [ '
-			. count( $files ) . ' files found in ' . ( time() - $scan_started ) . 's ]'
+			. count( $files ) . ' files found in ' . ( time() - $scan_started ) . 's, '
+			. $this->excluded_count . ' entries skipped by exclusion rules ]'
 		);
+
+		if ( $this->excluded_count > 0 ) {
+			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='excluded_by_rules'>Files/folders skipped by your exclusion rules:</span> " . intval( $this->excluded_count ) );
+		}
 
 		$sql_backup_file_name      = '';
 		$php_extensions            = get_loaded_extensions();
@@ -369,6 +411,15 @@ class WP2PcloudFileBackup {
 				}
 				if ( in_array( $value, $this->skip_folders, true ) ) {
 					continue;
+				}
+
+				// User exclusions: a matching folder is pruned here, so its subtree is never walked.
+				if ( ! empty( $this->exclude_patterns ) ) {
+					$relative = ltrim( substr( str_replace( '\\', '/', "$dir/$value" ), strlen( $this->scan_root ) ), '/' );
+					if ( wp2pcloudfuncs::is_excluded_path( $relative, $this->exclude_patterns ) ) {
+						$this->excluded_count++;
+						continue;
+					}
 				}
 
 				if ( is_file( "$dir/$value" ) ) {
@@ -911,11 +962,21 @@ class WP2PcloudFileBackup {
 					$this->write( $content, $params );
 					$uploadoffset += $bytes;
 				} catch ( Exception $e ) {
+					$dbg_msg = $e->getMessage();
+
+					if ( self::PCLOUD_ERR_UPLOAD_WRITE === $e->getCode() ) {
+						// Offset mismatch: resume where pCloud says the session is, or give the file up.
+						$resume_from = $this->resync_upload_offset( $upload_id, $uploadoffset, $filesize );
+						if ( $resume_from < 0 ) {
+							throw new WP2PcloudUploadException( 'upload_chunk() - pCloud rejects upload session ' . $upload_id . ' at offset ' . $uploadoffset . ' and it cannot be resumed', $uploadoffset, true, self::PCLOUD_ERR_UPLOAD_WRITE );
+						}
+						return $resume_from; // Next poll continues from the corrected offset.
+					}
+
 					$retry_in = $num_failures * 2;
 					if ( $retry_in > 60 ) {
 						$retry_in = 60;
 					}
-					$dbg_msg = $e->getMessage();
 					wp2pcloudlogger::info( 'Upload failed with message: ' . $dbg_msg . ' will retry in: ' . $retry_in . ' sec.' );
 					wp2pclouddebugger::log( 'upload_chunk() - write exception: ' . $dbg_msg );
 					if ( $retry_in > 0 ) {
@@ -998,20 +1059,100 @@ class WP2PcloudFileBackup {
 						wp2pcloudlogger::info( 'ERR: ' . $dbg_ex . ' [id: ' . $upload_id . ' | offset: ' . $uploadoffset . ']' );
 						wp2pclouddebugger::log( 'upload() -> Exception: ' . $dbg_ex );
 
+						if ( self::PCLOUD_ERR_UPLOAD_WRITE === $e->getCode() ) {
+							// Offset mismatch: retrying the same offset can never succeed. Ask pCloud
+							// where the session is and carry on from there, or give the file up.
+							$resume_from = $this->resync_upload_offset( $upload_id, $uploadoffset, $filesize );
+							if ( $resume_from < 0 ) {
+								throw new WP2PcloudUploadException( 'upload() - pCloud rejects upload session ' . $upload_id . ' at offset ' . $uploadoffset . ' and it cannot be resumed', $uploadoffset, true, self::PCLOUD_ERR_UPLOAD_WRITE );
+							}
+							$uploadoffset           = $resume_from;
+							$params['uploadoffset'] = $resume_from;
+							fseek( $file, $resume_from ); // phpcs:ignore
+							continue 2; // Re-read the chunk from the corrected offset.
+						}
+
 						$num_failures++;
 						$retry_in = min( $num_failures * 5, 30 );
 						sleep( $retry_in );
 					}
 				} while ( $num_failures < 10 );
 
-				// Retries exhausted for this chunk: do not silently advance — the chunk is missing on pCloud.
-				throw new Exception( 'upload() - chunk upload exhausted retries at offset ' . $uploadoffset );
+				// Retries exhausted for this chunk: do not silently advance — the chunk is missing on
+				// pCloud. Report the offset we did reach so the caller can persist that progress.
+				throw new WP2PcloudUploadException( 'upload() - chunk upload exhausted retries at offset ' . $uploadoffset, $uploadoffset );
 			}
 		} finally {
 			fclose( $file ); // phpcs:ignore
 		}
 
 		return $uploadoffset;
+	}
+
+	/**
+	 * Ask pCloud how many bytes an upload session already holds (`upload_info`).
+	 *
+	 * @param int $upload_id pCloud Upload ID.
+	 *
+	 * @return int Bytes held by the session, or -1 when pCloud could not tell us.
+	 */
+	public function get_upload_session_size( int $upload_id ): int {
+
+		$get_params = array(
+			'uploadid'     => $upload_id,
+			'access_token' => $this->authkey,
+		);
+
+		$api_response = wp_remote_get( $this->apiep . '/upload_info?' . http_build_query( $get_params ) );
+		if ( is_wp_error( $api_response ) || ! is_array( $api_response ) ) {
+			$error = is_wp_error( $api_response ) ? $api_response->get_error_message() : 'unknown transport error';
+			wp2pclouddebugger::log( 'get_upload_session_size() - api call failed ! [ ' . $error . ' ]' );
+			return -1;
+		}
+
+		$response_json = json_decode( wp_remote_retrieve_body( $api_response ), true );
+		if ( is_array( $response_json ) && isset( $response_json['result'], $response_json['size'] ) && 0 === intval( $response_json['result'] ) ) {
+			return max( 0, intval( $response_json['size'] ) );
+		}
+
+		wp2pclouddebugger::log( 'get_upload_session_size() - unexpected response: ' . wp_json_encode( $response_json ) );
+
+		return -1;
+	}
+
+	/**
+	 * Recover from pCloud result 2068 ("Error writing to upload.").
+	 *
+	 * pCloud keeps every byte that reached it before a chunk request was cut short, so its
+	 * idea of the session offset can drift away from ours; it then rejects every write at
+	 * our offset with 2068. Ask it where the session really is and resume from there — the
+	 * bytes it holds are a prefix of the local file, so no data is lost.
+	 *
+	 * @param int $upload_id    pCloud Upload ID.
+	 * @param int $local_offset Offset we tried to write at.
+	 * @param int $filesize     Size of the local file being uploaded.
+	 *
+	 * @return int Offset to resume from, or -1 when the session cannot be reused.
+	 */
+	private function resync_upload_offset( int $upload_id, int $local_offset, int $filesize ): int {
+
+		$remote_size = $this->get_upload_session_size( $upload_id );
+
+		if ( $remote_size < 0 || $remote_size > $filesize ) {
+			wp2pclouddebugger::log( 'resync_upload_offset() - session ' . $upload_id . ' unusable (pCloud reports ' . $remote_size . ' bytes, local file is ' . $filesize . ')' );
+			return -1;
+		}
+
+		if ( $remote_size === $local_offset ) {
+			// pCloud agrees with our offset yet still rejects the write: nothing left to resync.
+			wp2pclouddebugger::log( 'resync_upload_offset() - session ' . $upload_id . ' rejects offset ' . $local_offset . ' although pCloud reports the same size; abandoning session' );
+			return -1;
+		}
+
+		wp2pclouddebugger::log( 'resync_upload_offset() - session ' . $upload_id . ': local offset ' . $local_offset . ', pCloud holds ' . $remote_size . ' bytes; resuming from ' . $remote_size );
+		wp2pcloudlogger::info( 'Upload offset resynced with pCloud: resuming from ' . $remote_size . ' bytes.' );
+
+		return $remote_size;
 	}
 
 	/**
@@ -1103,6 +1244,7 @@ class WP2PcloudFileBackup {
 	private function write( string $content, ?array $get_params ): void {
 
 		$err_message = 'failed to write to upload!';
+		$err_code    = 0; // pCloud `result` code; carried on the exception so callers can react to 2068.
 
 		$get_params['access_token'] = $this->authkey;
 
@@ -1131,6 +1273,7 @@ class WP2PcloudFileBackup {
 					if ( 0 === intval( $response_json['result'] ) ) {
 						return;
 					}
+					$err_code = intval( $response_json['result'] );
 					if ( isset( $response_json['error'] ) && is_string( $response_json['error'] ) ) {
 						$err_message = trim( $response_json['error'] );
 					} else {
@@ -1146,9 +1289,9 @@ class WP2PcloudFileBackup {
 			}
 		}
 
-		wp2pclouddebugger::log( 'write() - api call failed ! [ ' . $err_message . ' ]' );
+		wp2pclouddebugger::log( 'write() - api call failed ! [ ' . $err_message . ' ] (code ' . $err_code . ', uploadid ' . intval( $get_params['uploadid'] ?? 0 ) . ', offset ' . intval( $get_params['uploadoffset'] ?? 0 ) . ')' );
 
-		throw new Exception( $err_message );
+		throw new Exception( $err_message, $err_code );
 	}
 
 	/**

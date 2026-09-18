@@ -84,6 +84,13 @@ class PclMysqlDump {
 	private array $triggers = array();
 
 	/**
+	 * Table each trigger belongs to, keyed by trigger name (used to honour exclude-tables).
+	 *
+	 * @var array<string, string>
+	 */
+	private array $trigger_tables = array();
+
+	/**
 	 * MySQL Procedures.
 	 *
 	 * @var array $procedures
@@ -514,7 +521,8 @@ class PclMysqlDump {
 	private function get_database_structure_triggers(): void {
 		if ( false === $this->dump_settings['skip-triggers'] ) {
 			foreach ( $this->db_handler->query( $this->type_adapter->show_triggers( $this->db_name ) ) as $row ) {
-				$this->triggers[] = $row['Trigger'];
+				$this->triggers[]                          = $row['Trigger'];
+				$this->trigger_tables[ $row['Trigger'] ] = (string) ( $row['Table'] ?? '' );
 			}
 		}
 	}
@@ -634,6 +642,11 @@ class PclMysqlDump {
 	 */
 	private function export_triggers(): void {
 		foreach ( $this->triggers as $trigger ) {
+			// A trigger on an excluded table would reference a table missing from the dump.
+			$table = $this->trigger_tables[ $trigger ] ?? '';
+			if ( '' !== $table && $this->matches( $table, $this->dump_settings['exclude-tables'] ) ) {
+				continue;
+			}
 			$this->get_trigger_structure( $trigger );
 		}
 

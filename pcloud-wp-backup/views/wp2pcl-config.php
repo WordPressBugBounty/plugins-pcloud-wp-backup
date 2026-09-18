@@ -49,6 +49,13 @@ if ( empty( $wp2pcl_withmysql ) || intval( $wp2pcl_withmysql ) < 1 ) {
 	$wp2pcl_withmysql_chk = '';
 }
 
+$wp2pcl_exclude_files  = (string) wp2pcloudfuncs::get_stored_val( PCLOUD_EXCLUDE_FILES, '' );
+$wp2pcl_exclude_tables = wp2pcloudfuncs::get_stored_list( PCLOUD_EXCLUDE_TABLES );
+$wp2pcl_db_tables      = $GLOBALS['wpdb']->get_col( 'SHOW TABLES' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+if ( ! is_array( $wp2pcl_db_tables ) ) {
+	$wp2pcl_db_tables = array();
+}
+
 $next_sch = wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() );
 
 $pl_dir_arr = explode( '/', plugin_dir_path( dirname( __FILE__ ) ) );
@@ -264,6 +271,62 @@ if ( count( $recent_notifications ) > 0 ) {
 						<input type="checkbox" name="wp2pcl_withmysql" id="wp2pcl_withmysql" value="1"
 									<?php echo esc_attr( $wp2pcl_withmysql_chk ); ?> />
 					</div>
+
+					<input type="hidden" name="wp2pcl_nonce" value="<?php echo esc_attr( $nonce ); ?>"/>
+
+				</form>
+
+			</div>
+
+			<div class="wp2pcloud-register-wrap wp2pcl-exclusions" style="padding-bottom: 30px">
+				<h4 class="pcl_transl" data-i10nk="exclusions_ttl">Exclude from the backup:</h4>
+
+				<form action="" id="wp2pcl_exclusions_form" autocomplete="off">
+
+					<div id="setting-error-exclusions_updated" class="updated settings-error below-h2" style="display: none">
+						<p class="pcl_transl" data-i10nk="your_sett_saved">Your settings are saved</p>
+					</div>
+
+					<div class="below-h2">
+						<strong class="pcl_transl" data-i10nk="excl_files_ttl">Files and folders:</strong>
+						<p class="description pcl_transl" data-i10nk="excl_pick_hint">Browse your site and click "Exclude" on any file or folder, or add a pattern by hand. Changes are saved immediately.</p>
+
+						<div class="wp2pcl-picker">
+							<div class="wp2pcl-picker-crumbs" id="wp2pcl_dir_crumbs"></div>
+							<ul class="wp2pcl-picker-list" id="wp2pcl_dir_list">
+								<li class="wp2pcl-muted pcl_transl" data-i10nk="loading">Loading&hellip;</li>
+							</ul>
+						</div>
+
+						<div class="wp2pcl-pattern-add">
+							<input type="text" id="wp2pcl_pattern_input" class="regular-text" placeholder="*.log" />
+							<button type="button" class="button pcl_transl" id="wp2pcl_pattern_add" data-i10nk="add_pattern">Add pattern</button>
+							<span class="description pcl_transl" data-i10nk="excl_pattern_hint">* and ? wildcards are allowed, e.g. *.log or wp-content/uploads/*.mp4</span>
+						</div>
+
+						<ul class="wp2pcl-chips" id="wp2pcl_excl_files_list"></ul>
+						<textarea name="wp2pcl_exclude_files" id="wp2pcl_exclude_files" style="display: none"><?php echo esc_textarea( $wp2pcl_exclude_files ); ?></textarea>
+					</div>
+
+					<?php if ( ! empty( $wp2pcl_db_tables ) ) : ?>
+					<div class="below-h2">
+						<strong class="pcl_transl" data-i10nk="excl_tables_lbl">Database tables to leave out of the dump:</strong>
+						<div class="wp2pcl-pattern-add">
+							<select id="wp2pcl_table_select">
+								<option value="" class="pcl_transl" data-i10nk="choose_table">&mdash; choose a table &mdash;</option>
+								<?php foreach ( $wp2pcl_db_tables as $wp2pcl_table ) : ?>
+									<option value="<?php echo esc_attr( $wp2pcl_table ); ?>"><?php echo esc_html( $wp2pcl_table ); ?></option>
+								<?php endforeach; ?>
+							</select>
+							<button type="button" class="button pcl_transl" id="wp2pcl_table_add" data-i10nk="add">Add</button>
+						</div>
+						<ul class="wp2pcl-chips" id="wp2pcl_excl_tables_list"></ul>
+						<textarea name="wp2pcl_exclude_tables" id="wp2pcl_exclude_tables" style="display: none"><?php echo esc_textarea( implode( "\n", $wp2pcl_exclude_tables ) ); ?></textarea>
+						<p class="description pcl_transl" data-i10nk="excl_tables_note">
+							Excluded tables are not in the backup, so a restore will not bring them back.
+						</p>
+					</div>
+					<?php endif; ?>
 
 					<input type="hidden" name="wp2pcl_nonce" value="<?php echo esc_attr( $nonce ); ?>"/>
 

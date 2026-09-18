@@ -68,8 +68,20 @@ class WP2PcloudDBBackup {
 		wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='start_db_backup'>Starting Database Backup</span>" );
 		wp2pclouddebugger::log( 'db_backup->start()' );
 
+		// User-configured table exclusions (settings page, filter `pcloud_exclude_tables`).
+		// PclMysqlDump matches exclude-tables as regular expressions, so anchor each name.
+		$excluded_tables = wp2pcloudfuncs::get_excluded_tables();
+		$exclude_regex   = array();
+		foreach ( $excluded_tables as $table ) {
+			$exclude_regex[] = '^' . str_replace( '\\*', '.*', preg_quote( $table, '/' ) ) . '$';
+		}
+		if ( ! empty( $excluded_tables ) ) {
+			wp2pclouddebugger::log( 'db_backup->start() - excluding tables: ' . implode( ', ', $excluded_tables ) );
+			wp2pcloudlogger::info( "<span class='pcl_transl' data-i10nk='db_tables_excluded'>Database tables left out of the dump:</span> " . esc_html( implode( ', ', $excluded_tables ) ) );
+		}
+
 		$dump_settings = array(
-			'exclude-tables'     => array(),
+			'exclude-tables'     => $exclude_regex,
 			'compress'           => PclMysqlDump::NONE,
 			'no-data'            => false,
 			'add-drop-table'     => true,

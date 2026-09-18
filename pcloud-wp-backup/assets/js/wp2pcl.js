@@ -4,6 +4,11 @@
  * @package pcloud_wp_backup
  */
 
+// Everything below is wrapped in a function scope on purpose: as a classic script, top-level
+// `let`/`function` declarations (notably `__`) would share the page's global lexical scope and
+// collide with other plugins' scripts that declare the same names (e.g. `const { __ } = wp.i18n`).
+( function () {
+
 php_data      = (typeof php_data !== "undefined") ? php_data : {};
 globalLang    = (typeof globalLang !== "undefined") ? globalLang : {};
 pCloudGlobals = (typeof pCloudGlobals !== "undefined") ? pCloudGlobals : {};
@@ -153,6 +158,198 @@ jQuery(
 		);
 
 		/**
+		 * EXCLUSIONS ( files / folders picker + DB tables ) ->
+		 * The two hidden textareas are the source of truth that gets POSTed; the picker,
+		 * the pattern box and the chip lists only edit them.
+		 */
+		const exclForm = $( '#wp2pcl_exclusions_form' );
+		if ( exclForm.length ) {
+			const filesField  = $( '#wp2pcl_exclude_files' );
+			const tablesField = $( '#wp2pcl_exclude_tables' );
+			const filesList   = $( '#wp2pcl_excl_files_list' );
+			const tablesList  = $( '#wp2pcl_excl_tables_list' );
+			const dirList     = $( '#wp2pcl_dir_list' );
+			const dirCrumbs   = $( '#wp2pcl_dir_crumbs' );
+			const tableSelect = $( '#wp2pcl_table_select' );
+			let exclFiles     = parseLines( filesField.val() );
+			let exclTables    = parseLines( tablesField.val() );
+			let currentDir    = '';
+
+			function parseLines( v ) {
+				return String( v || '' ).split( /\r\n|\r|\n/ ).map( function ( x ) { return x.trim(); } ).filter( function ( x ) { return x.length > 0; } );
+			}
+
+			function normalizePattern( p ) {
+				return String( p || '' ).trim().replace( /\\/g, '/' ).replace( /^(\.\/|\/)+/, '' ).replace( /\/+$/, '' );
+			}
+
+			function isCovered( path ) {
+				return exclFiles.some( function ( p ) { return p === path || path.indexOf( p + '/' ) === 0; } );
+			}
+
+			function mutedRow( text ) {
+				return $( '<li class="wp2pcl-muted"></li>' ).text( text );
+			}
+
+			function renderChips( list, items, kind ) {
+				list.empty();
+				if ( ! items.length ) {
+					list.append( mutedRow( __( 'nothing_excluded', 'Nothing excluded yet.' ) ) );
+					return;
+				}
+				items.forEach( function ( item ) {
+					const li = $( '<li class="wp2pcl-chip"></li>' ).append( $( '<code></code>' ).text( item ) );
+					li.append(
+						$( '<button type="button" class="wp2pcl-chip-remove">&times;</button>' )
+							.attr( { 'data-kind': kind, 'data-value': item, 'title': __( 'remove', 'Remove' ), 'aria-label': __( 'remove', 'Remove' ) } )
+					);
+					list.append( li );
+				} );
+			}
+
+			function markEntry( li ) {
+				const covered = isCovered( li.attr( 'data-path' ) );
+				li.toggleClass( 'wp2pcl-excluded', covered );
+				li.find( '.wp2pcl-exclude-add' ).prop( 'disabled', covered ).text( covered ? __( 'excluded_lbl', 'excluded' ) : __( 'exclude_btn', 'Exclude' ) );
+			}
+
+			function syncState() {
+				filesField.val( exclFiles.join( '\n' ) );
+				tablesField.val( exclTables.join( '\n' ) );
+				renderChips( filesList, exclFiles, 'file' );
+				renderChips( tablesList, exclTables, 'table' );
+				tableSelect.find( 'option' ).each( function () {
+					const v = $( this ).val();
+					if ( v ) {
+						$( this ).prop( 'disabled', exclTables.indexOf( v ) !== -1 );
+					}
+				} );
+				tableSelect.val( '' );
+				dirList.find( 'li[data-path]' ).each( function () { markEntry( $( this ) ); } );
+			}
+
+			function addFile( p ) {
+				p = normalizePattern( p );
+				if ( ! p || /^[*?\/]+$/.test( p ) || p.indexOf( '..' ) !== -1 ) {
+					return;
+				}
+				if ( exclFiles.indexOf( p ) === -1 ) {
+					exclFiles.push( p );
+					persist();
+				} else {
+					syncState();
+				}
+			}
+
+			function removeItem( kind, value ) {
+				if ( kind === 'file' ) {
+					exclFiles = exclFiles.filter( function ( x ) { return x !== value; } );
+				} else {
+					exclTables = exclTables.filter( function ( x ) { return x !== value; } );
+				}
+				persist();
+			}
+
+			function fmtSize( b ) {
+				if ( b >= 1073741824 ) { return ( b / 1073741824 ).toFixed( 1 ) + ' GB'; }
+				if ( b >= 1048576 ) { return ( b / 1048576 ).toFixed( 1 ) + ' MB'; }
+				if ( b >= 1024 ) { return Math.round( b / 1024 ) + ' KB'; }
+				return b + ' B';
+			}
+
+			function loadDir( path ) {
+				dirList.html( mutedRow( __( 'loading', 'Loading…' ) ) );
+				$.getJSON(
+					ajax_url + '&method=list_dir&path=' + encodeURIComponent( path ) + '&wp2pcl_nonce=' + wp2pcl_nonce,
+					function ( data ) {
+						if ( ! data || data.status !== 0 ) {
+							dirList.html( mutedRow( __( 'invalid_resp_srv', 'Invalid response from the server:' ) ) );
+							return;
+						}
+						currentDir = data.path || '';
+
+						dirCrumbs.empty().append( $( '<a href="#" data-path=""></a>' ).text( '/' ) );
+						let acc = '';
+						currentDir.split( '/' ).filter( Boolean ).forEach( function ( seg ) {
+							acc = acc ? acc + '/' + seg : seg;
+							dirCrumbs.append( ' › ' ).append( $( '<a href="#"></a>' ).attr( 'data-path', acc ).text( seg ) );
+						} );
+
+						dirList.empty();
+						if ( currentDir ) {
+							const up = currentDir.split( '/' ).slice( 0, -1 ).join( '/' );
+							dirList.append( $( '<li class="wp2pcl-dir-up"></li>' ).append( $( '<a href="#"></a>' ).attr( 'data-path', up ).text( '‹ ' + __( 'folder_up', 'Up one level' ) ) ) );
+						}
+						const entries = data.entries || [];
+						entries.forEach( function ( e ) {
+							const full = currentDir ? currentDir + '/' + e.name : e.name;
+							const li   = $( '<li></li>' ).attr( 'data-path', full ).addClass( e.type === 'dir' ? 'wp2pcl-dir' : 'wp2pcl-file' );
+							if ( e.type === 'dir' ) {
+								li.append( $( '<a href="#" class="wp2pcl-entry-name"></a>' ).attr( 'data-path', full ).text( e.name + '/' ) );
+							} else {
+								li.append( $( '<span class="wp2pcl-entry-name"></span>' ).text( e.name ) )
+									.append( $( '<span class="wp2pcl-entry-size"></span>' ).text( fmtSize( e.size || 0 ) ) );
+							}
+							li.append( $( '<button type="button" class="button button-small wp2pcl-exclude-add"></button>' ).attr( 'data-path', full ) );
+							markEntry( li );
+							dirList.append( li );
+						} );
+						if ( ! entries.length ) {
+							dirList.append( mutedRow( __( 'empty_folder', 'Empty folder' ) ) );
+						}
+						if ( data.truncated ) {
+							dirList.append( mutedRow( __( 'list_truncated', 'Only the first 1500 entries are shown.' ) ) );
+						}
+					}
+				).fail( function () {
+					dirList.html( mutedRow( __( 'invalid_resp_srv', 'Invalid response from the server:' ) ) );
+				} );
+			}
+
+			exclForm.on( 'click', 'a[data-path]', function ( e ) { e.preventDefault(); loadDir( $( this ).attr( 'data-path' ) ); } );
+			exclForm.on( 'click', '.wp2pcl-exclude-add', function ( e ) { e.preventDefault(); addFile( $( this ).attr( 'data-path' ) ); } );
+			exclForm.on( 'click', '.wp2pcl-chip-remove', function ( e ) { e.preventDefault(); removeItem( $( this ).attr( 'data-kind' ), $( this ).attr( 'data-value' ) ); } );
+			$( '#wp2pcl_pattern_add' ).on( 'click', function ( e ) { e.preventDefault(); addFile( $( '#wp2pcl_pattern_input' ).val() ); $( '#wp2pcl_pattern_input' ).val( '' ); } );
+			$( '#wp2pcl_pattern_input' ).on( 'keydown', function ( e ) { if ( e.key === 'Enter' ) { e.preventDefault(); $( '#wp2pcl_pattern_add' ).trigger( 'click' ); } } );
+			$( '#wp2pcl_table_add' ).on( 'click', function ( e ) {
+				e.preventDefault();
+				const t = tableSelect.val();
+				if ( t && exclTables.indexOf( t ) === -1 ) {
+					exclTables.push( t );
+					persist();
+				} else {
+					syncState();
+				}
+			} );
+
+			// Every add / remove is saved straight away; there is no Save button.
+			let savedTimer = null;
+			function persist() {
+				syncState();
+				$.post(
+					ajax_url + '&method=set_exclusions',
+					exclForm.serialize(),
+					function ( data ) {
+						if ( data && data.status === 0 ) {
+							exclFiles  = data.exclude_files || [];
+							exclTables = data.exclude_tables || [];
+							syncState();
+							const notice = $( '#setting-error-exclusions_updated' ).stop( true, true ).show();
+							clearTimeout( savedTimer );
+							savedTimer = setTimeout( function () { notice.fadeOut( 300 ); }, 1500 );
+						}
+					},
+					'JSON'
+				);
+			}
+
+			exclForm.submit( function ( e ) { e.preventDefault(); } );
+
+			syncState();
+			loadDir( '' );
+		}
+
+		/**
 		 * SET SCHEDULE INTERVAL ->
 		 * SET SCHEDULE INTERVAL ->
 		 */
@@ -286,8 +483,13 @@ jQuery(
 		 */
 		let backupLogWin = $( '.log_show' );
 
+		let pollInFlight = false; // one get_log poll at a time per page, whatever calls us
 		function pclCheckActivity( recheck )
 		{
+			if ( pollInFlight ) {
+				return;
+			}
+			pollInFlight = true;
 			$.ajax(
 				{
 					url: ajax_url + "&method=get_log&dbg=" + wp2pcl_debugmode + "&wp2pcl_nonce=" + wp2pcl_nonce,
@@ -419,6 +621,7 @@ jQuery(
 				}
 			).always(
 				function () {
+					pollInFlight = false;
 					if ( typeof recheck !== "undefined" && recheck ) {
 						window.setTimeout(
 							function () {
@@ -622,3 +825,5 @@ jQuery(
 		}
 	}
 );
+
+} )();

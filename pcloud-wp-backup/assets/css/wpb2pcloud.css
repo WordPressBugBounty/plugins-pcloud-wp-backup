@@ -218,3 +218,20 @@
 	background: none;
 	color: #CCC;
 }
+
+/* Exclusions picker (v2.0.9) */
+.wp2pcl-picker { max-width: 600px; border: 1px solid #c3c4c7; background: #fff; margin: 4px 0 8px; }
+.wp2pcl-picker-crumbs { padding: 6px 10px; border-bottom: 1px solid #dcdcde; background: #f6f7f7; font-family: monospace; }
+.wp2pcl-picker-list { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
+.wp2pcl-picker-list li { display: flex; align-items: center; gap: 8px; margin: 0; padding: 3px 10px; border-bottom: 1px solid #f0f0f1; font-family: monospace; }
+.wp2pcl-picker-list li:last-child { border-bottom: 0; }
+.wp2pcl-picker-list .wp2pcl-entry-name { flex: 1 1 auto; word-break: break-all; }
+.wp2pcl-picker-list .wp2pcl-entry-size { color: #787c82; font-size: 11px; white-space: nowrap; }
+.wp2pcl-picker-list li.wp2pcl-excluded { color: #a7aaad; }
+.wp2pcl-picker-list li.wp2pcl-excluded .wp2pcl-entry-name { text-decoration: line-through; }
+.wp2pcl-pattern-add { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 600px; margin: 4px 0; }
+.wp2pcl-chips { list-style: none; margin: 6px 0 0; padding: 0; max-width: 600px; }
+.wp2pcl-chips .wp2pcl-chip { display: inline-flex; align-items: center; gap: 4px; margin: 0 6px 6px 0; padding: 2px 4px 2px 8px; border: 1px solid #c3c4c7; border-radius: 3px; background: #f6f7f7; }
+.wp2pcl-chips code { background: none; padding: 0; }
+.wp2pcl-chip-remove { border: 0; background: none; cursor: pointer; color: #b32d2e; font-size: 16px; line-height: 1; padding: 0 4px; }
+.wp2pcl-muted { color: #787c82; font-style: italic; }
