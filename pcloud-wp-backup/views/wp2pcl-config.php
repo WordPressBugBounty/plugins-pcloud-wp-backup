@@ -56,8 +56,6 @@ if ( ! is_array( $wp2pcl_db_tables ) ) {
 	$wp2pcl_db_tables = array();
 }
 
-$next_sch = wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() );
-
 $pl_dir_arr = explode( '/', plugin_dir_path( dirname( __FILE__ ) ) );
 
 $img_url = '';
@@ -80,7 +78,8 @@ if ( ! isset( $plugin_path ) ) {
 	$plugin_path = plugins_url( '/', __FILE__ );
 }
 
-$next_backup_ts = wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() );
+// Next automatic backup, not the next run of the 2-minute scheduler check.
+$next_backup_ts = wp2pcl_next_auto_backup_ts();
 $next_backup    = $next_backup_ts ? gmdate( 'r', $next_backup_ts ) : '';
 $lang        = get_bloginfo( 'language' );
 $nonce       = wp_create_nonce();
@@ -239,8 +238,8 @@ if ( count( $recent_notifications ) > 0 ) {
 			<div class="schedule">
 				<h4 class="pcl_transl" data-i10nk="next_sched_bk_title">Next scheduled backup</h4>
 				<?php
-				if ( wp_next_scheduled( 'wp2pcl_run_pcloud_backup_hook' ) ) {
-					echo '<span class="pcl_transl" data-i10nk="next_bk_perf_on">Next backup will performed on </span>' . esc_html( $next_backup );
+				if ( $next_backup_ts ) {
+					echo '<span class="pcl_transl" data-i10nk="next_bk_perf_on">Next backup will be performed on</span> ' . esc_html( $next_backup );
 				} else {
 					echo '<span class="pcl_transl" data-i10nk="no_backups_after_check">There are no scheduled backups</span>';
 				}

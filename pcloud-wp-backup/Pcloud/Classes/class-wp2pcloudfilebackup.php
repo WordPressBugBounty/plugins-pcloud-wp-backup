@@ -579,6 +579,7 @@ class WP2PcloudFileBackup {
 
 						$save_started = time();
 
+						$zip->set_write_progress_callback( self::make_write_heartbeat( $archive_index, $actually_added, $num_files, $heartbeat_every ) );
 						$zip->save_as_file( $final_zip_file );
 						$zip->close();
 
@@ -633,6 +634,7 @@ class WP2PcloudFileBackup {
 
 			$save_started = time();
 
+			$zip->set_write_progress_callback( self::make_write_heartbeat( $archive_index, $actually_added, $num_files, $heartbeat_every ) );
 			$zip->save_as_file( $final_zip_file );
 			$zip->close();
 
@@ -715,16 +717,7 @@ class WP2PcloudFileBackup {
 			. $archive_index . ' | ' . $elapsed . 's elapsed'
 		);
 
-		// Liveness stamp for the watchdog. Kept in the operation row so any other
-		// request (browser poll or cron tick) can tell a working backup from a dead one.
-		$operation = wp2pcloudfuncs::get_operation();
-
-		if ( isset( $operation['operation'] ) && 'upload' === $operation['operation'] ) {
-			$operation['zip_heartbeat'] = time();
-			$operation['zip_done']      = $done;
-			$operation['zip_total']     = $total;
-			wp2pcloudfuncs::set_operation( $operation );
-		}
+		self::stamp_zip_liveness( $done, $total );
 
 		// The user-facing log is capped at 20 KB, so it gets a much coarser cadence than
 		// the debug log — enough to show the backup is alive, not enough to flood it.
@@ -734,6 +727,69 @@ class WP2PcloudFileBackup {
 				. $done . '/' . $total . ' (' . $percent . '%)'
 			);
 		}
+	}
+
+	/**
+	 * Stamp the watchdog's liveness signal into the operation row.
+	 *
+	 * Kept in the operation row so any other request (browser poll or cron tick) can
+	 * tell a working backup from a dead one — see wp2pcl_zip_is_stalled().
+	 *
+	 * @param int $done  Entries added so far.
+	 * @param int $total Total candidate files.
+	 *
+	 * @return void
+	 */
+	private static function stamp_zip_liveness( int $done, int $total ): void {
+
+		$operation = wp2pcloudfuncs::get_operation();
+
+		if ( isset( $operation['operation'] ) && 'upload' === $operation['operation'] ) {
+			$operation['zip_heartbeat'] = time();
+			$operation['zip_done']      = $done;
+			$operation['zip_total']     = $total;
+			wp2pcloudfuncs::set_operation( $operation );
+		}
+	}
+
+	/**
+	 * Build the progress callback used while one archive is written to disk.
+	 *
+	 * save_as_file() is the longest single call of the ZIP phase — adding entries only
+	 * records them, the actual reading/compressing/writing of every byte happens here.
+	 * Up to 2.0.9 it ran without a single log line or liveness stamp, so a worker killed
+	 * mid-write left no trace of how far it got. The callback logs and stamps every
+	 * $every entries or every 15 seconds, whichever comes first.
+	 *
+	 * @param int $archive_index Archive being written (1-based).
+	 * @param int $done          Entries added in the ZIP phase so far (for the stamp).
+	 * @param int $total         Total candidate files (for the stamp).
+	 * @param int $every         Entry interval between beats.
+	 *
+	 * @return callable
+	 */
+	private static function make_write_heartbeat( int $archive_index, int $done, int $total, int $every ): callable {
+
+		$started_at = time();
+		$last_beat  = $started_at;
+
+		return static function ( int $written, int $entries, int $bytes ) use ( $archive_index, $done, $total, $every, $started_at, &$last_beat ): void {
+
+			$now = time();
+
+			if ( $written < $entries && 0 !== ( $written % $every ) && ( $now - $last_beat ) < 15 ) {
+				return;
+			}
+
+			$last_beat = $now;
+
+			wp2pclouddebugger::log(
+				'ZIP write: archive #' . $archive_index . ' | ' . $written . '/' . $entries . ' entries | '
+				. wp2pcloudfuncs::format_bytes( $bytes ) . ' written | ' . ( $now - $started_at ) . 's'
+			);
+
+			self::stamp_zip_liveness( $done, $total );
+		};
 	}
 
 	/**

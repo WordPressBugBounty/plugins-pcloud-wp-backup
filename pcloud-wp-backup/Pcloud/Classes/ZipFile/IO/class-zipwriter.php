@@ -41,12 +41,31 @@ class ZipWriter {
 	protected ZipContainer $zip_container;
 
 	/**
+	 * Optional per-entry progress callback.
+	 *
+	 * @var callable|null $progress_callback
+	 */
+	protected $progress_callback = null;
+
+	/**
 	 * Class contructor.
 	 *
 	 * @param ZipContainer $container Container.
 	 */
 	public function __construct( ZipContainer $container ) {
 		$this->zip_container = clone $container;
+	}
+
+	/**
+	 * Set a callback invoked after each local entry is written.
+	 *
+	 * Signature: function ( int $entries_written, int $entries_total, int $bytes_written ): void.
+	 *
+	 * @param callable|null $callback Callback, or null for none.
+	 * @return void
+	 */
+	public function set_progress_callback( ?callable $callback ): void {
+		$this->progress_callback = $callback;
 	}
 
 	/**
@@ -76,9 +95,13 @@ class ZipWriter {
 	 */
 	protected function write_local_block( $out_stream ): void {
 
-		$zip_entries = $this->zip_container->get_entries();
+		$zip_entries   = $this->zip_container->get_entries();
+		$entries_total = count( $zip_entries );
+		$entries_done  = 0;
 
 		foreach ( $zip_entries as $zip_entry ) {
+
+			++$entries_done;
 
 			$file_path = $zip_entry->get_path();
 
@@ -97,6 +120,10 @@ class ZipWriter {
 
 			if ( $zip_entry->is_data_descriptor_enabled() ) {
 				$this->write_data_descriptor( $out_stream, $zip_entry );
+			}
+
+			if ( null !== $this->progress_callback ) {
+				call_user_func( $this->progress_callback, $entries_done, $entries_total, (int) ftell( $out_stream ) );
 			}
 		}
 	}

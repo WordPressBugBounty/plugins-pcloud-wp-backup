@@ -54,6 +54,13 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	private int $now;
 
 	/**
+	 * Optional progress callback handed to the writer; see set_write_progress_callback().
+	 *
+	 * @var callable|null $write_progress_callback
+	 */
+	private $write_progress_callback = null;
+
+	/**
 	 * Class constructor.
 	 */
 	public function __construct() {
@@ -62,12 +69,29 @@ class ZipFile implements Countable, ArrayAccess, Iterator {
 	}
 
 	/**
+	 * Register a callback invoked after each entry is written during save.
+	 *
+	 * Signature: function ( int $entries_written, int $entries_total, int $bytes_written ): void.
+	 * The callback runs inside save_as_file() / save_as_stream(), which are otherwise a
+	 * single silent call that can last minutes on a large archive.
+	 *
+	 * @param callable|null $callback Callback, or null to remove it.
+	 * @return self
+	 */
+	public function set_write_progress_callback( ?callable $callback ): self {
+		$this->write_progress_callback = $callback;
+		return $this;
+	}
+
+	/**
 	 * Create a zip writer.
 	 *
 	 * @return ZipWriter
 	 */
 	protected function create_zip_writer(): ZipWriter {
-		return new ZipWriter( $this->zip_container );
+		$writer = new ZipWriter( $this->zip_container );
+		$writer->set_progress_callback( $this->write_progress_callback );
+		return $writer;
 	}
 
 	/**

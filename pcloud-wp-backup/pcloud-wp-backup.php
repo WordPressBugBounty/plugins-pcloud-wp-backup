@@ -9,7 +9,7 @@
  * Plugin URI: https://www.pcloud.com
  * Summary: pCloud WP Backup plugin
  * Description: pCloud WP Backup has been created to make instant backups of your blog and its data, regularly.
- * Version: 2.0.9
+ * Version: 2.0.11
  * Requires PHP: 8.0
  * Author: pCloud
  * URI: https://www.pcloud.com
@@ -107,7 +107,7 @@ if ( ! defined( 'PCLOUD_PLUGIN_MIN_PHP_VERSION' ) ) {
 if ( ! defined( 'PCLOUD_PLUGIN_VERSION' ) ) {
 	// Single source of truth for the running version: drives the upgrade routine and the
 	// cache-busting `ver` on our JS/CSS. Keep in sync with the `Version:` header above.
-	define( 'PCLOUD_PLUGIN_VERSION', '2.0.9' );
+	define( 'PCLOUD_PLUGIN_VERSION', '2.0.11' );
 }
 
 // The maximum number of failures allowed.
@@ -852,9 +852,12 @@ function wp2pcl_zip_is_stalled( array $operation ): bool {
 	// working directory means the worker is alive and this is a slow backup, not a dead one.
 	clearstatcache();
 
+	// '*.zip*', not '*.zip': ZipFile::save_as_file() writes to "NNN_archive.zip.temp<uniqid>"
+	// and only renames it once the whole archive is done. Up to 2.0.9 this glob matched
+	// finished archives only, so it could not see the one file actually being written.
 	$tmp_dir   = plugin_dir_path( __FILE__ ) . 'tmp';
 	$newest    = 0;
-	$tmp_files = is_dir( $tmp_dir ) ? glob( $tmp_dir . '/*.zip' ) : array();
+	$tmp_files = is_dir( $tmp_dir ) ? glob( $tmp_dir . '/*.zip*' ) : array();
 
 	if ( is_array( $tmp_files ) ) {
 		foreach ( $tmp_files as $tmp_file ) {
@@ -874,21 +877,66 @@ function wp2pcl_zip_is_stalled( array $operation ): bool {
 		return false;
 	}
 
+	$sapi = php_sapi_name();
+
 	wp2pclouddebugger::log(
 		'== STALLED == no ZIP progress for ' . $silent_for . 's (limit ' . $timeout . 's) in state "'
 		. $operation['state'] . '". The worker building the archives was terminated without '
-		. 'raising a PHP error — typically an fpm request_terminate_timeout or an out-of-memory '
-		. 'kill. Resetting so a new backup can be started.'
+		. 'raising a PHP error. PHP runs as "' . $sapi . '": ' . wp2pcl_stall_cause_hint( $sapi )
+		. ' Resetting so a new backup can be started.'
 	);
 
 	wp2pcloudlogger::info(
 		"<span style='color: red' class='pcl_transl' data-i10nk='backup_stalled'>Backup stopped: the server ended the process while archives were being created. Please try again — if it repeats, the site may be too large for this server's limits.</span>"
 	);
 
+	// Server-specific advice the site owner can act on (or forward to their host).
+	if ( 'litespeed' === $sapi ) {
+		wp2pcloudlogger::info(
+			"<span class='pcl_transl' data-i10nk='backup_stalled_litespeed'>Your server runs LiteSpeed, which stops long-running requests. Ask your hosting provider to enable the \"noabort\" and \"noconntimeout\" settings for this site, then try again.</span>"
+		);
+	} elseif ( 'fpm-fcgi' === $sapi ) {
+		wp2pcloudlogger::info(
+			"<span class='pcl_transl' data-i10nk='backup_stalled_fpm'>Your server runs PHP-FPM, which stops requests that take too long. Ask your hosting provider to raise \"request_terminate_timeout\" for this site, then try again.</span>"
+		);
+	}
+
 	wp2pcloudfuncs::set_operation();
 	wp2pcloudfuncs::set_stored_val( PCLOUD_HAS_ACTIVITY, '0' );
 
 	return true;
+}
+
+
+/**
+ * Explain, for the debug log, what usually kills a PHP worker silently under a given SAPI.
+ *
+ * Up to 2.0.9 the STALLED line always blamed "an fpm request_terminate_timeout or an
+ * out-of-memory kill" — wrong on LiteSpeed and other non-fpm hosts, and misleading for support.
+ *
+ * @param string $sapi Value of php_sapi_name().
+ *
+ * @return string
+ */
+function wp2pcl_stall_cause_hint( string $sapi ): string {
+
+	switch ( $sapi ) {
+		case 'litespeed':
+			return 'LiteSpeed ends a PHP request when the client disconnects or the connection times out; '
+				. 'ignore_user_abort() and set_time_limit() do not prevent that — the host must set the '
+				. '"noabort" and "noconntimeout" environment variables. Otherwise an out-of-memory kill.';
+		case 'fpm-fcgi':
+			return 'typically php-fpm request_terminate_timeout (not overridable by set_time_limit()) '
+				. 'or an out-of-memory kill.';
+		case 'cgi-fcgi':
+			return 'typically the FastCGI process manager\'s timeout (e.g. mod_fcgid FcgidIOTimeout / '
+				. 'FcgidBusyTimeout) or an out-of-memory kill.';
+		case 'apache2handler':
+			return 'typically a host-level process limit (e.g. RLimitCPU, a watchdog on long requests) '
+				. 'or an out-of-memory kill.';
+		default:
+			return 'typically a host-level request time limit or an out-of-memory kill.';
+	}
 }
 
 
@@ -1512,6 +1560,102 @@ function wp2pcl_perform_auto_backup(): void {
 
 
 /**
+ * Earliest time the next automatic backup can start, for display on the settings page.
+ *
+ * Mirrors the gates in wp2pcl_run_pcloud_backup_hook(): the backup is due once the last
+ * backup is older than the chosen frequency, must fall inside the optional hour window
+ * (GMT), and is only noticed on the next run of the 2-minute `init_autobackup` event.
+ * The cron event's own next run is NOT the next backup — it is just the next check.
+ * WP-Cron needs site traffic, so on a quiet site the real start can be later.
+ *
+ * @return int Unix timestamp, or 0 when no automatic backup can be predicted (cron event
+ *             missing or unknown frequency).
+ */
+function wp2pcl_next_auto_backup_ts(): int {
+
+	$next_tick = wp_next_scheduled( 'init_autobackup', wp2pcl_cron_args() );
+	if ( ! $next_tick ) {
+		return 0;
+	}
+
+	$lastbackupdt_tm = intval( wp2pcloudfuncs::get_stored_val( PCLOUD_LAST_BACKUPDT ) );
+	$freq            = wp2pcloudfuncs::get_stored_val( PCLOUD_SCHDATA_KEY );
+	$after_hour      = intval( wp2pcloudfuncs::get_stored_val( PCLOUD_SCHHOUR_FROM_KEY ) );
+	$before_hour     = intval( wp2pcloudfuncs::get_stored_val( PCLOUD_SCHHOUR_TO_KEY ) );
+
+	$intervals = array(
+		'2_minute' => '+2 minutes',
+		'1_hour'   => '+1 hour',
+		'4_hours'  => '+4 hours',
+		'daily'    => '+1 day',
+		'weekly'   => '+1 week',
+		'monthly'  => '+1 month',
+	);
+
+	if ( ! isset( $intervals[ $freq ] ) ) {
+		return 0;
+	}
+
+	$due = ( $lastbackupdt_tm > 0 ) ? intval( strtotime( $intervals[ $freq ], $lastbackupdt_tm ) ) : 0;
+
+	// Nothing can start before the next scheduler check.
+	$candidate = max( $due, intval( $next_tick ) );
+
+	// Hour window, same test as the cron hook. Walk forward hour by hour (at most two days)
+	// to the first moment the window is open.
+	for ( $step = 0; $step <= 48; $step++ ) {
+		$ts = ( 0 === $step ) ? $candidate : ( intval( floor( $candidate / 3600 ) ) + $step ) * 3600;
+
+		if ( wp2pcl_hour_in_window( intval( gmdate( 'H', $ts ) ), $after_hour, $before_hour ) ) {
+			return $ts;
+		}
+	}
+
+	return 0;
+}
+
+
+/**
+ * Is a GMT hour inside the "start between X and Y" window from the settings page?
+ *
+ * -1 means "not set" for either bound. Y is exclusive. A window whose start is later than
+ * its end runs across midnight (22 → 6 means 22:00–05:59). Up to 2.0.10 such a window
+ * could never match (hour >= 22 AND hour < 6), so automatic backups silently never ran.
+ * Equal bounds (5 → 5) mean "during that hour only" — it used to never match either.
+ *
+ * @param int $hour        Hour to test, 0–23 (GMT).
+ * @param int $after_hour  Window start, 0–23, or -1 for none.
+ * @param int $before_hour Window end (exclusive), 0–23, or -1 for none.
+ *
+ * @return bool
+ */
+function wp2pcl_hour_in_window( int $hour, int $after_hour, int $before_hour ): bool {
+
+	$has_after  = $after_hour >= 0;
+	$has_before = $before_hour >= 0;
+
+	if ( ! $has_after && ! $has_before ) {
+		return true;
+	}
+	if ( $has_after && ! $has_before ) {
+		return $hour >= $after_hour;
+	}
+	if ( ! $has_after && $has_before ) {
+		return $hour < $before_hour;
+	}
+	if ( $after_hour === $before_hour ) {
+		return $hour === $after_hour;
+	}
+	if ( $after_hour < $before_hour ) {
+		return $hour >= $after_hour && $hour < $before_hour;
+	}
+
+	// Window runs across midnight.
+	return $hour >= $after_hour || $hour < $before_hour;
+}
+
+
+/**
  * Auto-backup hook function
  *
  * @throws Exception Standart exception will be thrown.
@@ -1569,13 +1713,9 @@ function wp2pcl_run_pcloud_backup_hook(): void {
 	$after_hour   = intval( $after_hour );
 	$before_hour  = intval( $before_hour );
 
-	if ( $after_hour >= 0 && $current_hour < $after_hour ) {
+	if ( ! wp2pcl_hour_in_window( $current_hour, $after_hour, $before_hour ) ) {
 		$rejected         = true;
-		$reject_reasons[] = 'hour_window: current_hour=' . $current_hour . ' < after_hour=' . $after_hour;
-	}
-	if ( $before_hour >= 0 && $current_hour >= $before_hour ) {
-		$rejected         = true;
-		$reject_reasons[] = 'hour_window: current_hour=' . $current_hour . ' >= before_hour=' . $before_hour;
+		$reject_reasons[] = 'hour_window: current_hour=' . $current_hour . ' outside ' . $after_hour . '..' . $before_hour . ' (GMT)';
 	}
 
 	$operation = wp2pcloudfuncs::get_operation();
@@ -1706,6 +1846,8 @@ function wp2pcloud_display_settings(): void {
 		'archive_icon'      => plugins_url( '/assets/img/zip.png', __FILE__ ),
 		'api_hostname'      => wp2pcloudfuncs::get_api_ep_hostname(),
 		'PCLOUD_BACKUP_DIR' => PCLOUD_BACKUP_DIR,
+		// Cache-busts translate.json, which the JS fetches itself (was a fixed "?v=2.0.01").
+		'plugin_version'    => PCLOUD_PLUGIN_VERSION,
 	);
 
 	wp_localize_script( 'wp2pcl-scr', 'php_data', $data );
@@ -1749,30 +1891,9 @@ function wp2pcl_install(): void {
 	// constant *values* (not option names). Passing them into get_stored_val used to create
 	// junk rows in wp_options keyed by the value itself (e.g. "beFbFDM0paj"). No longer done.
 
-	add_filter(
-		'cron_schedules',
-		function ( $schedules ) {
-			$schedules['10_sec']   = array(
-				'interval' => 10,
-				'display'  => __( '10 seconds' ),
-			);
-			$schedules['2_minute'] = array(
-				'interval' => 120,
-				'display'  => __( '2 minute' ),
-			);
-			$schedules['1_hour']   = array(
-				'interval' => 3600,
-				'display'  => __( '1 hour' ),
-			);
-			$schedules['4_hours']  = array(
-				'interval' => 3600 * 4,
-				'display'  => __( '4 hours' ),
-			);
-
-			return $schedules;
-		}
-	);
-
+	// The '2_minute' interval comes from backup_to_pcloud_cron_schedules(), which is
+	// registered when this file loads and is therefore already active here. (Up to 2.0.10 a
+	// duplicate inline filter lived here too, also defining an unused '10_sec' interval.)
 	wp_schedule_event( time(), '2_minute', 'init_autobackup', wp2pcl_cron_args() );
 
 	WP2PcloudRatingPrompt::on_activate();

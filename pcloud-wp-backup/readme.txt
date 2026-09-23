@@ -4,7 +4,7 @@ Tags: backup, pCloud
 Requires at least: 5.0
 Tested up to: 7.1.1
 Requires PHP: 8.0
-Stable tag: 2.0.9
+Stable tag: 2.0.11
 License: GPLv3 or later
 
 The pCloud WP Backup plugin will help you backup everything on your blog with one click and store it in the cloud in the most secure way.
@@ -57,6 +57,17 @@ If the manual backup mode works it means that the plugin is functioning correctl
 1. Here is a screenshot of the plugin in action
 
 == Changelog ==
+
+= 2.0.11 =
+* Fix: automatic backups never ran when the "start between" hours crossed midnight (for example from 22:00 to 06:00). Such windows now work as expected.
+* Fix: the settings page always said "There are no scheduled backups". It now shows when the next automatic backup is due.
+* Improved: the plugin's messages are now fully translated in all 12 languages, including the backup exclusion settings.
+* Removed an unused internal schedule.
+
+= 2.0.10 =
+* Fix: a backup whose archive was still being written could be mistaken for a stopped one and reset after 20 minutes on slow servers.
+* Improved: the debug log now reports progress while each archive is written to disk, so an interrupted backup shows exactly how far it got.
+* Improved: when the server stops a backup on a LiteSpeed or PHP-FPM server, the message now tells you which setting to ask your hosting provider to change.
 
 = 2.0.9 =
 * New: exclude files and folders from the backup. Browse your site and pick them from the settings page, or add patterns such as *.log.

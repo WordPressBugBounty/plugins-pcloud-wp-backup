@@ -78,7 +78,7 @@ jQuery(
 
 		if (pluginURL.length > 0) {
 			$.getJSON(
-				pluginURL + "assets/translate.json?v=2.0.01",
+				pluginURL + "assets/translate.json?v=" + encodeURIComponent( php_data.plugin_version || '2.0.01' ),
 				function (json) {
 					if (typeof json['pcl_lang'] !== "undefined") {
 						transl = json['pcl_lang'];
